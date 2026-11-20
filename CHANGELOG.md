@@ -24,6 +24,14 @@
 
 ## [Unreleased]
 
+### 文档
+
+- README 增加 [mihomo 仓库链接](https://github.com/MetaCubeX/mihomo) 与依赖关系说明
+- 新增"关于内嵌内核的说明"一节：实测把 mihomo 编译进来的可行性与代价
+  （体积 5MB→45MB、依赖 1→170、启动 2s→17ms、但失去崩溃隔离且需自备 geodata），
+  附可直接用的内嵌代码骨架与 build tag 切换思路
+
+
 ## [1.0.0] - 2026-11-20
 
 首个版本。
