@@ -24,6 +24,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-20
+
 ### 新增
 
 - **内嵌内核构建（`-tags embedded`）**：把 mihomo 与 geodata 一起编译进二进制，
@@ -104,5 +106,6 @@
   别处起的内核
 - 真实机场订阅无法进入公开 CI，真实节点验证只能人工跑
 
-[Unreleased]: https://github.com/Facetomyself/mihomo-pool/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Facetomyself/mihomo-pool/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Facetomyself/mihomo-pool/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Facetomyself/mihomo-pool/releases/tag/v1.0.0

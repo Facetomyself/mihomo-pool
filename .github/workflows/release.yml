@@ -142,13 +142,52 @@ jobs:
             http://example.com/ | head -c 300
           echo
 
+      # 内嵌版单独验证：它必须在不依赖外部 mihomo 的情况下跑起来。
+      # 这一步把 PATH 里的 mihomo 清掉，证明"真的不依赖"。
+      - name: 验证内嵌产物（无外部内核）
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          BASE="https://github.com/Facetomyself/mihomo-pool/releases/download/${TAG}"
+          EPKG="mihomo-pool-embedded_Linux_x86_64.tar.gz"
+
+          curl -sfL -o "${EPKG}" "${BASE}/${EPKG}"
+          grep " ${EPKG}\$" checksums.txt > emb.sha
+          if [ ! -s emb.sha ]; then
+            echo "checksums.txt 里没有 ${EPKG}"
+            exit 1
+          fi
+          sha256sum -c emb.sha
+
+          mkdir -p emb && tar xzf "${EPKG}" -C emb
+          chmod +x emb/mihomo-pool-embedded
+
+          echo "=== build 字段必须是 full ==="
+          BUILD=$(./emb/mihomo-pool-embedded version | python3 -c "import json,sys; print(json.load(sys.stdin)['build'])")
+          echo "build=${BUILD}"
+          [ "${BUILD}" = "full" ] || { echo "期望 build=full，得到 ${BUILD}"; exit 1; }
+
+          echo "=== 清掉 mihomo，证明不依赖外部内核 ==="
+          sudo mv /usr/local/bin/mihomo /tmp/mihomo.hidden
+          export PATH="/usr/local/bin:/usr/bin:/bin"
+          command -v mihomo && { echo "mihomo 仍在 PATH 里"; exit 1; } || echo "PATH 中无 mihomo"
+
+          echo "=== 内嵌版自己起内核跑一次真实请求 ==="
+          echo '[{"name":"n1","type":"socks5","server":"127.0.0.1","port":1}]' > /tmp/nodes.json
+          rm -rf /tmp/embsmoke
+          ./emb/mihomo-pool-embedded \
+            -dir /tmp/embsmoke -socks 52890 -api 52891 -base 52900 \
+            health -nodes /tmp/nodes.json -concurrency 2 2>&1 | head -c 500
+          echo
+          # 内核能起、能出节点表，就说明内嵌链路完整
+          sudo mv /tmp/mihomo.hidden /usr/local/bin/mihomo
+
       - name: 冒烟失败时打印诊断
         if: failure()
         run: |
           echo "--- 当前目录 ---"
           ls -la
           echo "--- checksums ---"
-          cat checksums.txt 2>/dev/null | head -10
+          cat checksums.txt 2>/dev/null | head -20
           echo "--- Release 资产 ---"
           gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' || true
         env:
