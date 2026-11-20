@@ -181,6 +181,39 @@ mihomo-pool health -bin /usr/local/bin/mihomo -sub "..."
 
 动手前先 `health` 测速：慢节点会被自动降权，不用手动挑节点。
 
+## 多订阅：订阅池调度
+
+有多个订阅时，单订阅那套不够用——会踩三个坑：便宜的被打满、
+一个订阅挂了拖垮整体、不同订阅额度混在一起算不清。
+
+```bash
+# 一看：订阅状态（权重、熔断、下次刷新）
+mihomo-pool subpool list -sub "cheap=$URL1|30m,quota=0.5" -sub "fast=$URL2,quota=0.3,weight=2" -refresh
+
+# 二筛：按标签挑节点
+mihomo-pool subpool nodes -sub "a=$URL" -region JP -rate 0.1 -tag stream
+
+# 三验：起内核跑真实请求
+mihomo-pool subpool check -sub "a=$URL,quota=0.6" -sub "b=$URL2,quota=0.4" -n 40
+```
+
+**配额**用 `quota=0.5` 限制单订阅最多占多少在飞，防止一个订阅吃掉全部并发。
+实测两订阅 0.6/0.4 时请求分布 23:17。
+
+**熔断**：连续失败 3 次（`-max-fail`）暂停该订阅，5 分钟（`-half-open`）后尝试恢复。
+熔断不清空已有节点——订阅服务抖一次不代表节点失效。
+
+**标签**从节点名自动提取，不用写正则：
+
+```
+🇭🇰香港高速01|BGP|CMCU       → region:HK bgp speed
+🇯🇵日本专线03|流媒体          → region:JP dedicated stream
+🇺🇸美国洛杉矶01|流媒体|0.01x   → region:US rate:0.01 stream
+```
+
+**跨订阅去重默认关闭**。同一节点出现在两个订阅时保留两条，因为
+额度和限速各自独立，合并后就不知道消耗了谁的额度。确实要合并才加 `-dedupe`。
+
 ## 真实机场的坑（工具已处理，但你得知道）
 
 真实订阅（实测 46 节点）一跑就踩两个：

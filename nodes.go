@@ -38,6 +38,16 @@ type Node struct {
 	// Alive 是内核认为的存活状态。
 	Alive bool
 
+	// Subscription 是该节点的来源订阅名；inline 节点为空。
+	//
+	// 这是订阅池的核心字段：配额、权重、统计、去重判定全部按它归集。
+	// 同一物理节点若来自不同订阅，会保留为两条独立记录——因为
+	// 两个订阅的额度、限速、到期时间是各自独立的，合并会丢失归属。
+	Subscription string
+
+	// Tags 是从节点名/类型提取的细粒度标签（地区、倍率、流媒体等）。
+	Tags []string
+
 	// —— 运行期统计，由分发器维护 ——
 	inflight  atomic.Int64
 	okCount   atomic.Int64

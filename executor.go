@@ -131,6 +131,9 @@ type Executor struct {
 	// wg/quit 管理 worker 池生命周期；mu 保护 quit 的重建
 	mu   sync.Mutex
 	quit chan struct{}
+
+	// quota 按订阅限制在飞占比（订阅池启用时生效）
+	quota *quotaTracker
 }
 
 type task struct {
@@ -144,9 +147,10 @@ func newExecutor(p *Pool) *Executor {
 	cfg := ExecutorConfig{}
 	cfg.normalize()
 	e := &Executor{
-		pool: p,
-		cfg:  cfg,
-		trs:  make(map[string]*http.Transport),
+		pool:  p,
+		cfg:   cfg,
+		trs:   make(map[string]*http.Transport),
+		quota: newQuotaTracker(),
 	}
 	e.jobs = make(chan *task, cfg.Queue)
 	e.start()
@@ -429,11 +433,18 @@ func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Respon
 			continue
 		}
 
+		// 配额名额与在飞计数同生命周期
+		if e.quota != nil {
+			e.quota.Acquire(pick.Subscription)
+		}
 		pick.inflight.Add(1)
 		e.inflight.Add(1)
 		out, perr := e.roundTrip(ctx, pick.ProxyURL, method, req, timeout, maxBody)
 		pick.inflight.Add(-1)
 		e.inflight.Add(-1)
+		if e.quota != nil {
+			e.quota.Release(pick.Subscription)
+		}
 
 		// 5xx 视为该节点失败：这类错误几乎总是出口/上游的问题，
 		// 换节点重试才有意义。4xx 是请求本身的问题，直接返回。
@@ -492,6 +503,12 @@ func (e *Executor) pickNode(candidates []*Node, key string) (*Node, error) {
 			return nil, fmt.Errorf("mihomo-pool: 全部节点在飞已满（每节点上限 %d）", e.cfg.PerNode)
 		}
 	}
+
+	// 订阅配额：剔除已超占比的订阅的节点
+	if e.quota != nil {
+		usable = e.quota.filterByQuota(usable)
+	}
+
 	return e.pool.disp.Pick(usable, key)
 }
 

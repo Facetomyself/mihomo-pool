@@ -131,6 +131,18 @@ func ParseSubscription(body []byte) ([]NodeSpec, error) {
 	return nil, errors.New("mihomo-pool: 订阅既不包含 proxies/proxy-providers，也没有可解析的分享链接")
 }
 
+// FetchSubscriptionWithParse 拉取订阅并按给定选项清洗。
+func FetchSubscriptionWithParse(ctx context.Context, rawURL string, fo FetchOptions, po ParseOptions) ([]NodeSpec, error) {
+	fo.Parse = po
+	nodes, err := FetchSubscription(ctx, rawURL, fo)
+	if err != nil {
+		return nil, err
+	}
+	// FetchSubscription 内部已按 fo.Parse 清洗；这里补一层幂等清洗，
+	// 防止调用方绕过 FetchOptions 直接改 Parse。
+	return CleanNodes(nodes, po), nil
+}
+
 // ParseOptions 控制订阅解析的清洗行为。
 type ParseOptions struct {
 	// KeepInfoNodes 为 true 时保留机场投放的信息节点（剩余流量/套餐到期等）。
@@ -311,6 +323,11 @@ func InfoNodeName(name string) bool {
 	for _, kw := range []string{
 		"剩余流量", "剩余：", "套餐到期", "到期时间", "下次重置",
 		"重置剩余", "距离下次", "过期时间", "流量重置", "官网", "订阅",
+		// 以下为实测补充：机场公告节点的常见措辞。
+		// 注意别加"线路""节点"这类词——它们会命中
+		// "香港BGP线路01" 这种正常节点名，属于不可接受的误伤。
+		"总量", "已用", "流量：", "余量", "上次登录",
+		"点击", "更新于", "公告",
 	} {
 		if strings.Contains(n, kw) {
 			return true

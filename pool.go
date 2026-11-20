@@ -448,6 +448,23 @@ func (p *Pool) Running() bool {
 	return p.started
 }
 
+// SetQuota 设置某订阅的最大在飞占比（0 取消限制）。
+//
+// 只对带 Subscription 归属的节点生效；inline 节点不受配额约束。
+func (p *Pool) SetQuota(sub string, ratio float64) {
+	if p.exec != nil && p.exec.quota != nil {
+		p.exec.quota.SetLimit(sub, ratio)
+	}
+}
+
+// QuotaSnapshot 返回各订阅当前的在飞占比。
+func (p *Pool) QuotaSnapshot() map[string]float64 {
+	if p.exec == nil || p.exec.quota == nil {
+		return nil
+	}
+	return p.exec.quota.Snapshot()
+}
+
 // WaitReady 阻塞到内核就绪（用于测试与启动编排）。
 func (p *Pool) WaitReady(ctx context.Context) error {
 	tick := time.NewTicker(100 * time.Millisecond)

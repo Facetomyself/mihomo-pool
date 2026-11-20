@@ -35,6 +35,10 @@ type NodeSpec struct {
 	Raw map[string]any
 	// Group 是节点分组标签（如 "hk"、"us"），仅用于业务侧分发，不影响配置。
 	Group string
+	// Subscription 是该节点的来源订阅名（订阅池填充）；为空表示 inline 节点。
+	Subscription string
+	// Tags 是细粒度标签（region:HK、rate:0.1、stream 等）。
+	Tags []string
 }
 
 // ProviderSpec 描述一个交给内核自拉取的机场订阅。

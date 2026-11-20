@@ -125,6 +125,8 @@ func main() {
 		os.Exit(runHealth(args))
 	case "nodes":
 		os.Exit(runNodes(args))
+	case "subpool":
+		os.Exit(runSubpool(args))
 	case "version", "-v", "--version":
 		emit(map[string]any{
 			"ok":            true,
@@ -160,6 +162,7 @@ func usage() {
   stop      停止内核
   health    并发测速
   nodes     列出节点
+  subpool   多订阅池：list | refresh | nodes | check
   version   版本信息
 
 全局参数（除 version 外都接受）:

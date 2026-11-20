@@ -436,6 +436,135 @@ mihomo-pool status -bin /usr/local/bin/mihomo
 协议细节（JSONL 格式、`body_b64`、`kind` 取值、版本协商）见
 [python/README.md](python/README.md) 的「协议细节」一节。
 
+## 订阅池：多订阅调度
+
+单订阅只解决"能拉到节点"。多个订阅时真正的问题是**怎么调度**：
+一个便宜的订阅被打满、一个订阅挂了拖垮整体、不同订阅额度混在一起算不清。
+
+订阅池提供四层细粒度控制。
+
+### 1. 多订阅聚合 + 互不影响
+
+```go
+sp := mihomopool.NewSubscriptionPool(mihomopool.SubscriptionPoolOptions{
+    DefaultInterval:    time.Hour,
+    MaxConsecutiveFail: 3,              // 连续失败 3 次熔断
+    CircuitHalfOpen:    5 * time.Minute, // 5 分钟后尝试恢复
+})
+sp.AddMany([]mihomopool.SubscriptionSpec{
+    {Name: "cheap", URL: urlA, Quota: 0.5, Weight: 1},
+    {Name: "fast",  URL: urlB, Quota: 0.3, Weight: 2, Priority: 2},
+    {Name: "backup", URL: urlC, Quota: 0.2, Weight: 3},
+})
+sp.RefreshAll(ctx, true)
+sp.ApplyTo(ctx, pool)      // 起内核，自动下发配额与标签
+```
+
+刷新是并发的，一个订阅失败只影响它自己：其他订阅的节点继续服务，
+失败的订阅按连续失败次数降权，达到阈值后熔断、停止贡献节点。
+
+### 2. 订阅级健康与熔断
+
+熔断判定基于**刷新失败**，而**保留已有节点**：订阅服务抖动一次，
+不等于已拉到的节点立刻失效，所以节点不会凭空消失。
+
+```
+healthy → (失败1次) → degraded → (连续3次) → circuit-open
+                                          ↓ 5 分钟后
+                                      尝试恢复 → healthy
+```
+
+权重公式（`EffWeight`）：
+
+```
+静态权重 × (1 + Priority/10)
+  × 成功率映射(0.2~1.0)
+  ÷ (1 + 连续失败数)
+  × 延迟衰减(1000/(avg+1000))
+```
+
+熔断/禁用时权重为 0。
+
+### 3. 配额：防止一个订阅吃掉全部并发
+
+```go
+{Name: "cheap", URL: urlA, Quota: 0.5}   // 最多占 50% 在飞
+```
+
+判定口径是「该订阅在飞数 / 全局在飞数」。全局在飞为 0 时首个请求总能通过。
+
+关键设计：**全部订阅都超配额时退回原始候选**，宁可略超也不让请求无节点可用。
+
+实测（两个订阅，配额 0.6/0.4，40 个请求）：分布 23 : 17。
+
+### 4. 细粒度标签
+
+从节点名自动提取结构化标签，不用再写正则：
+
+```
+🇭🇰香港高速01|BGP|CMCU        → region:HK  bgp  speed  proto:vless
+🇯🇵日本专线03|BGP|流媒体       → region:JP  dedicated  stream  bgp
+🇺🇸美国洛杉矶01|流媒体|0.01x    → region:US  rate:0.01  stream
+```
+
+| 标签 | 含义 |
+|---|---|
+| `region:HK` | 地区（ISO 3166-1 alpha-2） |
+| `rate:0.1` | 计费倍率 |
+| `stream` | 流媒体解锁 |
+| `dedicated` | 专线 |
+| `bgp` / `speed` | 线路特性 |
+| `proto:vless` | 协议 |
+| `expiry` | 机场公告节点 |
+
+```bash
+mihomo-pool subpool nodes -sub "a=$URL" -region JP -rate 0.1 -tag stream
+```
+
+### 跨订阅去重：默认不做
+
+**同一物理节点出现在多个订阅时，默认保留为两条独立记录。**
+
+理由：两个订阅的额度、限速、到期时间是各自独立的。
+合并后就无法知道实际消耗了谁的额度，也丢掉了"C 订阅明天到期"这类信息。
+
+每条节点用 `Node.Subscription` 标明归属，配额、统计、筛选全部按归属归集。
+
+确实需要合并时显式开启：
+
+```go
+SubscriptionPoolOptions{DedupeAcrossSubs: true}   // 或 CLI 的 -dedupe
+```
+
+### CLI
+
+```bash
+# 列出订阅状态（含权重、熔断、刷新时间）
+mihomo-pool subpool list -sub "a=$URL|30m,quota=0.5,weight=2" -refresh -pretty
+
+# 拉取所有订阅
+mihomo-pool subpool refresh -sub "a=$URL" -sub "b=$URL2"
+
+# 按标签筛节点
+mihomo-pool subpool nodes -sub "a=$URL" -region JP -rate 0.1 -limit 20
+
+# 起内核跑真实请求，验证订阅池可用性
+mihomo-pool subpool check -sub "a=$URL,quota=0.6" -sub "b=$URL2,quota=0.4" -n 40
+```
+
+订阅多时用文件维护：
+
+```json
+[
+  {"name": "cheap", "url": "...", "interval": "30m", "quota": 0.5, "priority": 1},
+  {"name": "fast",  "url": "...", "weight": 2, "tags": ["premium"]}
+]
+```
+
+```bash
+mihomo-pool subpool list -file subs.json -refresh
+```
+
 ## 真实机场订阅的坑（已处理）
 
 用真实订阅（46 节点，31 vless + 15 hysteria2）跑出来的两个必然踩的坑：
