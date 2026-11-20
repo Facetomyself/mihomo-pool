@@ -31,6 +31,70 @@ listeners:
 
 于是 N 个节点就是 N 个本地端口，`socks5://127.0.0.1:17900` 永远走 `hk-1`，互不牵扯。分发器只需把请求发到对应端口，不需要和内核的控制面抢状态。
 
+## 安装
+
+### 预编译二进制（推荐）
+
+从 [Releases](https://github.com/Facetomyself/mihomo-pool/releases) 下载对应平台：
+
+| 平台 | 文件名 |
+|---|---|
+| Linux x86_64 | `mihomo-pool_Linux_x86_64.tar.gz` |
+| Linux arm64 | `mihomo-pool_Linux_arm64.tar.gz` |
+| macOS Intel | `mihomo-pool_Darwin_x86_64.tar.gz` |
+| macOS Apple Silicon | `mihomo-pool_Darwin_arm64.tar.gz` |
+| Windows x64 | `mihomo-pool_Windows_x86_64.zip` |
+| Windows arm64 | `mihomo-pool_Windows_arm64.zip` |
+
+```bash
+# Linux / macOS：自动选对架构
+OS=$(uname -s); ARCH=$(uname -m)
+[ "$ARCH" = "aarch64" ] && ARCH=arm64
+[ "$ARCH" = "x86_64" ]  && ARCH=x86_64
+case "$OS" in Darwin) ARCH=$([ "$ARCH" = "arm64" ] && echo arm64 || echo x86_64);; esac
+
+TAG=v1.0.0
+curl -sL -o mp.tar.gz "https://github.com/Facetomyself/mihomo-pool/releases/download/${TAG}/mihomo-pool_${OS}_${ARCH}.tar.gz"
+curl -sL -o sums.txt "https://github.com/Facetomyself/mihomo-pool/releases/download/${TAG}/checksums.txt"
+grep "mihomo-pool_${OS}_${ARCH}.tar.gz" sums.txt > one.sha && sha256sum -c one.sha
+tar xzf mp.tar.gz && sudo mv mihomo-pool /usr/local/bin/
+```
+
+包内已含 `python/`（纯标准库客户端）、`skills/mihomo-pool/SKILL.md`、`CHANGELOG.md`。
+
+### 从源码
+
+```bash
+git clone https://github.com/Facetomyself/mihomo-pool
+cd mihomo-pool
+go build -o /usr/local/bin/mihomo-pool ./cmd/mihomo-pool
+```
+
+### 还需要 mihomo 内核
+
+```bash
+# Linux x86_64
+VER=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+curl -sL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${VER}/mihomo-linux-amd64-compatible-${VER}.gz"
+gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/
+mihomo -v
+```
+
+macOS / Windows 从 [mihomo releases](https://github.com/MetaCubeX/mihomo/releases) 下对应包。
+
+## 版本
+
+```bash
+mihomo-pool version
+# {"cli_version":"1.0.0","lib_version":"1.0.0","protocol":1,"default_ports":{...}}
+```
+
+- `cli_version` — 发行版本（git tag），随每次发布变
+- `lib_version` — Go 库 API 兼容版本，只在不兼容改动时跳
+- `protocol` — CLI 与 Python 客户端的 JSONL 协议版本，不匹配会直接报错
+
+变更记录见 [CHANGELOG.md](CHANGELOG.md)，发版流程见 [RELEASING.md](RELEASING.md)。
+
 ## 快速开始
 
 ```go

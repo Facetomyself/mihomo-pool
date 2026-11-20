@@ -1,0 +1,156 @@
+# GoReleaser 配置。
+#
+# 本地验证：goreleaser check && goreleaser release --snapshot --clean
+# 正式发布：打 tag 后由 .github/workflows/release.yml 自动跑
+#
+# 版本注入：main.buildVersion 是 CLI 版本，库版本在 options.go 里是常量
+# （API 兼容性语义，不随发行变）。两者都会在 version 子命令里输出。
+
+version: 2
+
+project_name: mihomo-pool
+
+before:
+  hooks:
+    # 发布前确保依赖干净，避免产物带上本地垃圾
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: mihomo-pool
+    main: ./cmd/mihomo-pool
+    binary: mihomo-pool
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{ .Version }}
+    # CGO 必须关：交叉编译到非本机架构时 cgo 会去找目标平台的编译器。
+    # 本项目的二进制不依赖 cgo（mihomo 是独立进程，不链接它）。
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # 32 位与 mips 之类的平台不提供：mihomo 内核本身也不便在这些平台跑
+    ignore: []
+
+  # 演示程序可选发布，体积小，方便用户直接试
+  - id: mihomo-pool-demo
+    main: ./cmd/mihomo-pool-demo
+    binary: mihomo-pool-demo
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  # 用 uname 风格命名，方便用户一眼看出该下哪个
+  - name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+    ids:
+      - mihomo-pool
+      - mihomo-pool-demo
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - skills/mihomo-pool/SKILL.md
+      # 只收 Python 源码。python/** 会把本地跑测试生成的 __pycache__/*.pyc
+      # 一起打进去——那是特定解释器版本的字节码，对其他版本只是垃圾。
+      - python/mihomo_pool/*.py
+      - python/README.md
+      - python/examples/*.py
+      - python/tests/*.py
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# 生成变更日志：只看 feat/fix 之类的提交，噪音提交不进发布说明
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^style:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: 新功能
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: 修复
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: 性能
+      regexp: '^.*?perf(\(.+\))??!?:.+$'
+      order: 2
+    - title: 其它
+      order: 999
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  github:
+    owner: Facetomyself
+    name: mihomo-pool
+  draft: false
+  # 预发布版本（v1.2.3-rc1）自动标 prerelease
+  prerelease: auto
+  mode: replace
+  header: |
+    ## 安装
+
+    ```bash
+    # Linux / macOS
+    curl -sL https://github.com/Facetomyself/mihomo-pool/releases/latest/download/mihomo-pool_$(uname -s)_$(uname -m | sed 's/x86_64/x86_64/;s/aarch64/arm64/').tar.gz | tar xz
+    sudo mv mihomo-pool /usr/local/bin/
+
+    # Windows：下载 zip 解压，把 mihomo-pool.exe 放进 PATH
+    ```
+
+    需要 mihomo 内核：https://github.com/MetaCubeX/mihomo/releases
+
+    Python 客户端是纯标准库，不需要单独安装：
+    ```bash
+    export PYTHONPATH=/path/to/mihomo-pool/python:$PYTHONPATH
+    ```
+
+  footer: |
+    **完整校验**
+    ```bash
+    sha256sum -c checksums.txt
+    ```
+
+    文档：[README](https://github.com/Facetomyself/mihomo-pool#readme) ·
+    [使用指南](https://github.com/Facetomyself/mihomo-pool/blob/main/python/README.md) ·
+    [AI 技能](https://github.com/Facetomyself/mihomo-pool/blob/main/skills/mihomo-pool/SKILL.md)

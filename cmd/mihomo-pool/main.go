@@ -38,8 +38,12 @@ import (
 	mihomopool "github.com/Facetomyself/mihomo-pool"
 )
 
-// buildVersion 由 -ldflags 注入。
-var buildVersion = "dev"
+// buildVersion 是 CLI 自身的版本，由 -ldflags 注入（见 .goreleaser.yaml）。
+//
+// 不注入时回落到库版本，避免出现 CLI 说 "dev"、库说 "1.0.0" 的漂移。
+// 两者语义不同：lib_version 是 API 兼容性版本，cli_version 是发行版本
+// （可以带 git 描述，例如 v1.0.0-3-gabc1234）。
+var buildVersion = ""
 
 // protocolVersion 是 JSONL 协议版本，Python 侧据此做兼容判断。
 const protocolVersion = 1
@@ -124,7 +128,7 @@ func main() {
 	case "version", "-v", "--version":
 		emit(map[string]any{
 			"ok":            true,
-			"cli_version":   buildVersion,
+			"cli_version":   cliVersion(),
 			"protocol":      protocolVersion,
 			"lib_version":   mihomopool.Version,
 			"default_ports": defaultPortSummary(),
@@ -267,4 +271,12 @@ func trimNL(s string) string {
 // newReader 返回带缓冲的 stdin 行读取器。
 func newReader() *bufio.Reader {
 	return bufio.NewReaderSize(os.Stdin, 1<<20)
+}
+
+// cliVersion 返回 CLI 版本：优先用注入值，否则回落到库版本。
+func cliVersion() string {
+	if strings.TrimSpace(buildVersion) != "" {
+		return buildVersion
+	}
+	return mihomopool.Version
 }

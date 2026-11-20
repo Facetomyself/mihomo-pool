@@ -1,0 +1,139 @@
+name: release
+
+# 打 v* 标签即发布。
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# 产物：6 个平台的二进制（linux/darwin/windows × amd64/arm64），
+# 附带 checksums.txt、变更日志、skill 与 Python 客户端。
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # 发布前先把 CI 该跑的跑一遍：tag 一旦发出去就撤不回，
+  # 宁可多花 3 分钟也不发一个坏版本。
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件未格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test (race)
+        run: go test -race -count=1 -timeout 400s ./...
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: python 客户端测试
+        working-directory: python
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
+  goreleaser:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要完整历史来生成 changelog
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check
+
+      - name: goreleaser release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 上传产物快照（排查用）
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-artifacts
+          path: dist/
+          retention-days: 7
+
+  # 发布后做一次冒烟：把 linux/amd64 的产物下载下来真的执行一遍。
+  # 二进制能产出不等于能跑，这一步专门抓"链接时崩/初始化 panic"。
+  smoke:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载发布产物并执行
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          BASE="https://github.com/Facetomyself/mihomo-pool/releases/download/${TAG}"
+          curl -sL -o mp.tar.gz "${BASE}/mihomo-pool_Linux_x86_64.tar.gz"
+          curl -sL -o sums.txt "${BASE}/checksums.txt"
+
+          grep "mihomo-pool_Linux_x86_64.tar.gz" sums.txt > one.sha
+          sha256sum -c one.sha
+
+          tar xzf mp.tar.gz
+          chmod +x mihomo-pool
+
+          echo "=== version ==="
+          ./mihomo-pool version
+
+          echo "=== 校验版本号与 tag 一致 ==="
+          VER=$(./mihomo-pool version | python3 -c "import json,sys; print(json.load(sys.stdin)['cli_version'])")
+          echo "cli_version=$VER  tag=${TAG}"
+          if [ "v${VER}" != "${TAG}" ]; then
+            echo "版本号与 tag 不一致"
+            exit 1
+          fi
+
+          echo "=== 装内核跑一次真实请求 ==="
+          VER_M=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+          curl -sL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${VER_M}/mihomo-linux-amd64-compatible-${VER_M}.gz"
+          gunzip -f mihomo.gz && chmod +x mihomo && sudo mv mihomo /usr/local/bin/
+          mihomo -v
+
+          ./mihomo-pool call -bin /usr/local/bin/mihomo \
+            -dir /tmp/smoke -socks 51890 -api 51891 -base 51900 \
+            -no-kernel -allow-direct -timeout 15000 \
+            http://example.com/ | head -c 300
+          echo
+
+      - name: 冒烟失败时打印日志
+        if: failure()
+        run: |
+          echo "--- dist ---"
+          ls -la dist/ 2>/dev/null | head -20
