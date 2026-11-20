@@ -51,7 +51,7 @@ func runStart(argv []string) int {
 		return fail(err.Error(), nil)
 	}
 
-	nodes, nerr := loadNodes(ctx, subURL, nodesFile)
+	nodes, nerr := loadNodes(ctx, subURL, nodesFile, mihomopool.ParseOptions{})
 	if nerr != nil {
 		return fail("加载节点失败: "+nerr.Error(), nil)
 	}

@@ -38,6 +38,8 @@ func runServe(argv []string) int {
 		nodesFile   string
 		providers   []string
 		noKernel    bool
+		keepInfo    bool
+		keepDupes   bool
 		idleTimeout time.Duration
 	)
 	fs.IntVar(&workers, "workers", 32, "并发 worker 数")
@@ -51,6 +53,8 @@ func runServe(argv []string) int {
 		return nil
 	})
 	fs.BoolVar(&noKernel, "no-kernel", false, "不启动内核（已有内核在别处跑，只做请求分发）")
+	fs.BoolVar(&keepInfo, "keep-info-nodes", false, "保留机场投放的信息节点（剩余流量/套餐到期等，默认丢弃）")
+	fs.BoolVar(&keepDupes, "keep-duplicates", false, "保留连接参数完全相同的重复节点（默认丢弃）")
 	fs.DurationVar(&idleTimeout, "idle-timeout", 0, "空闲多久自动退出（0=不限）")
 
 	if err := fs.Parse(argv); err != nil {
@@ -66,7 +70,10 @@ func runServe(argv []string) int {
 	}
 
 	if !noKernel {
-		nodes, perr := loadNodes(ctx, subURL, nodesFile)
+		nodes, perr := loadNodes(ctx, subURL, nodesFile, mihomopool.ParseOptions{
+			KeepInfoNodes:  keepInfo,
+			KeepDuplicates: keepDupes,
+		})
 		if perr != nil {
 			return fail("加载节点失败: "+perr.Error(), nil)
 		}
@@ -141,12 +148,16 @@ func runServe(argv []string) int {
 }
 
 // loadNodes 从订阅或文件加载节点。
-func loadNodes(ctx context.Context, subURL, nodesFile string) ([]mihomopool.NodeSpec, error) {
+func loadNodes(ctx context.Context, subURL, nodesFile string, po mihomopool.ParseOptions) ([]mihomopool.NodeSpec, error) {
 	if subURL != "" {
-		return mihomopool.FetchSubscription(ctx, subURL, mihomopool.FetchOptions{})
+		return mihomopool.FetchSubscription(ctx, subURL, mihomopool.FetchOptions{Parse: po})
 	}
 	if nodesFile != "" {
-		return readNodesFile(nodesFile)
+		nodes, err := readNodesFile(nodesFile)
+		if err != nil {
+			return nil, err
+		}
+		return mihomopool.CleanNodes(nodes, po), nil
 	}
 	return nil, nil
 }

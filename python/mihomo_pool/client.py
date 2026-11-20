@@ -260,6 +260,8 @@ class Pool:
         nodes_file: str | None = None,
         providers: Sequence[str] | None = None,
         no_kernel: bool = False,
+        keep_info_nodes: bool = False,
+        keep_duplicates: bool = False,
         extra_args: Sequence[str] | None = None,
         startup_timeout: float = 60.0,
         env: dict[str, str] | None = None,
@@ -283,6 +285,8 @@ class Pool:
         self._nodes_file = nodes_file
         self._providers = list(providers or [])
         self._no_kernel = no_kernel
+        self._keep_info_nodes = keep_info_nodes
+        self._keep_duplicates = keep_duplicates
         self._extra_args = list(extra_args or [])
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
@@ -332,6 +336,10 @@ class Pool:
             cmd += ["-provider", p]
         if self._no_kernel:
             cmd.append("-no-kernel")
+        if self._keep_info_nodes:
+            cmd.append("-keep-info-nodes")
+        if self._keep_duplicates:
+            cmd.append("-keep-duplicates")
         cmd += self._extra_args
         return cmd
 

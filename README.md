@@ -260,6 +260,44 @@ mihomo-pool status -bin /usr/local/bin/mihomo
 协议细节（JSONL 格式、`body_b64`、`kind` 取值、版本协商）见
 [python/README.md](python/README.md) 的「协议细节」一节。
 
+## 真实机场订阅的坑（已处理）
+
+用真实订阅（46 节点，31 vless + 15 hysteria2）跑出来的两个必然踩的坑：
+
+### 1. 机场会塞"信息节点"
+
+```
+剩余流量：878.1 GB
+距离下次重置剩余：22 天
+套餐到期：2026-12-12
+```
+
+它们和某个真节点**连接参数完全相同**（同 server、同 port、同 uuid），只是换了名字。
+当成节点用会：白占端口、测速后可能排到前面抢走真节点流量、让节点数失真。
+
+模块默认按连接指纹去重 + 按关键词识别，`ParseSubscription` 输出 40 个而非 46 个。
+需要保留时：
+
+```go
+mihomopool.ParseSubscriptionWithOptions(body, mihomopool.ParseOptions{
+    KeepInfoNodes:  true,
+    KeepDuplicates: true,
+})
+```
+
+CLI 对应 `-keep-info-nodes` / `-keep-duplicates`。
+
+### 2. 中文节点名导致 listener 名冲突
+
+真实节点名几乎全是 `🇭🇰香港高速01|BGP|CMCU` 这种。早期实现把非 ASCII 字符全替换成 `_`，
+结果所有国家的节点名都退化成 `out-______01_CTCU_0_1x`，内核直接：
+
+```
+level=fatal msg="Parse config error: listener out-______01_CTCU_0_1x is the duplicate name"
+```
+
+现在 listener 名追加稳定哈希后缀（`out-______01_CTCU_0_1x-3f2a91b4`），保证唯一且重载后不变。
+
 ## 测试
 
 ```bash

@@ -38,6 +38,8 @@ type FetchOptions struct {
 	MaxBytes int64
 	// Header 是额外请求头，可带机场的鉴权 token。
 	Header map[string]string
+	// Parse 是解析清洗选项。零值 = 丢弃信息节点 + 去重（推荐）。
+	Parse ParseOptions
 }
 
 // FetchSubscription 拉取订阅正文并按格式解析成节点列表。
@@ -46,7 +48,8 @@ func FetchSubscription(ctx context.Context, rawURL string, fo FetchOptions) ([]N
 	if err != nil {
 		return nil, err
 	}
-	return ParseSubscription(body)
+	// 默认走清洗：真实机场普遍会塞信息节点和重复条目
+	return ParseSubscriptionWithOptions(body, fo.Parse)
 }
 
 // fetchSubBody 拉订阅原文。
@@ -126,6 +129,73 @@ func ParseSubscription(body []byte) ([]NodeSpec, error) {
 	}
 
 	return nil, errors.New("mihomo-pool: 订阅既不包含 proxies/proxy-providers，也没有可解析的分享链接")
+}
+
+// ParseOptions 控制订阅解析的清洗行为。
+type ParseOptions struct {
+	// KeepInfoNodes 为 true 时保留机场投放的信息节点（剩余流量/套餐到期等）。
+	// 默认丢弃：它们和真节点连接参数完全相同，留着只会白占端口、抢流量。
+	KeepInfoNodes bool
+	// KeepDuplicates 为 true 时保留连接参数完全相同的多条节点。
+	// 默认丢弃后出现的重复项（保留第一条）。
+	KeepDuplicates bool
+}
+
+// ParseSubscriptionWithOptions 是 ParseSubscription 的可配置版本。
+func ParseSubscriptionWithOptions(body []byte, po ParseOptions) ([]NodeSpec, error) {
+	nodes, err := ParseSubscription(body)
+	if err != nil {
+		return nil, err
+	}
+	return CleanNodes(nodes, po), nil
+}
+
+// CleanNodes 按选项清洗节点列表。
+//
+// 返回的节点顺序稳定（保留首次出现的位置），并保证名字唯一。
+func CleanNodes(nodes []NodeSpec, po ParseOptions) []NodeSpec {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	seenName := make(map[string]int, len(nodes))
+	seenFP := make(map[string]string, len(nodes))
+	out := make([]NodeSpec, 0, len(nodes))
+
+	for _, n := range nodes {
+		if !po.KeepInfoNodes && InfoNodeName(n.Name) {
+			continue
+		}
+		fp := connFingerprint(n.Raw)
+		if fp != "" && !po.KeepDuplicates {
+			if prev, dup := seenFP[fp]; dup {
+				_ = prev // 保留先出现的那个
+				continue
+			}
+			seenFP[fp] = n.Name
+		}
+		if cnt, dup := seenName[n.Name]; dup {
+			seenName[n.Name] = cnt + 1
+			n.Name = fmt.Sprintf("%s-%d", n.Name, cnt+1)
+			// 改名后要同步进 Raw，否则配置里仍是旧名
+			if n.Raw != nil {
+				n.Raw = cloneRaw(n.Raw)
+				n.Raw["name"] = n.Name
+			}
+		} else {
+			seenName[n.Name] = 1
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// cloneRaw 浅拷贝地图，避免改到调用方的数据。
+func cloneRaw(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // tryBase64Package 尝试把整包解成文本。
@@ -222,6 +292,53 @@ func parseClashYAML(text string) ([]NodeSpec, error) {
 		out = append(out, ns)
 	}
 	return out, nil
+}
+
+// InfoNodeName 判断节点名是否是机场投放的信息节点。
+//
+// 真实机场常把"剩余流量/套餐到期/到期时间"这类公告塞进 proxies，
+// 它们和某个真节点使用完全相同的连接参数，只是换了名字。
+// 这类条目当成节点用会有三个后果：
+//   - 白占一个独立端口
+//   - 测速后可能排到前面，抢走真节点的流量（它们指向同一台机器）
+//   - 让"节点数"失真，用户以为有 46 个出口其实只有 43 个
+func InfoNodeName(name string) bool {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return false
+	}
+	// 中文冒号或英文冒号后跟数字量，基本只出现在公告里
+	for _, kw := range []string{
+		"剩余流量", "剩余：", "套餐到期", "到期时间", "下次重置",
+		"重置剩余", "距离下次", "过期时间", "流量重置", "官网", "订阅",
+	} {
+		if strings.Contains(n, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// connFingerprint 生成节点的连接指纹，用于识别同一出口的重复条目。
+//
+// 指纹只取决定"连到哪台机器、用什么身份"的字段，不含 name。
+// 两个节点指纹相同 = 出口完全一样，保留一个即可。
+func connFingerprint(p map[string]any) string {
+	var sb strings.Builder
+	for _, k := range []string{
+		"type", "server", "port", "uuid", "password",
+		"cipher", "network", "servername", "sni", "flow",
+	} {
+		v, ok := p[k]
+		if !ok {
+			continue
+		}
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(strings.ToLower(strings.TrimSpace(fmt.Sprint(v))))
+		sb.WriteByte('&')
+	}
+	return sb.String()
 }
 
 // parseShareLinks 解析一行一个的分享链接。

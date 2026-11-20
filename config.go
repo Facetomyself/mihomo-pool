@@ -248,18 +248,53 @@ func buildProvidersNode(providers []ProviderSpec) *yaml.Node {
 }
 
 // listenerName 把节点名转成合法的 listener 名。
+//
+// 有两点必须同时满足：
+//  1. 只含 mihomo 接受的字符（字母数字 - _）
+//  2. 全局唯一 —— listener 名字重复会让内核直接 fatal 退出
+//
+// 只做字符替换是不够的：真实机场的节点名几乎全是中文/emoji，
+// 替换后会退化成一堆下划线，例如
+//
+//	"🇺🇸美国高速01|CTCU|0.1x"  →  out-______01_CTCU_0_1x
+//
+// 多个国家的中文名替换后完全相同，内核报
+// "listener ... is the duplicate name" 后直接退出。
+// 因此这里追加节点名的哈希后缀，保证唯一且跨进程稳定。
 func listenerName(node string) string {
 	var sb strings.Builder
 	sb.WriteString("out-")
+	ascii := 0
 	for _, r := range node {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 			sb.WriteRune(r)
+			ascii++
 		default:
 			sb.WriteByte('_')
 		}
 	}
-	return sb.String()
+	// 可读部分过长时截断，避免超长名字
+	name := sb.String()
+	if len(name) > 48 {
+		name = name[:48]
+	}
+	// 哈希后缀保证唯一；截断后也必须带，否则仍可能撞名
+	return fmt.Sprintf("%s-%08x", name, fnvHash(node))
+}
+
+// fnvHash 返回节点名的稳定哈希（FNV-1a 32 位）。
+func fnvHash(s string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
 }
 
 // listenAddr 决定端口绑定地址。

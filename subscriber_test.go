@@ -186,3 +186,127 @@ func TestSplitHostPortIPv6(t *testing.T) {
 		t.Fatal("无端口应失败")
 	}
 }
+
+func TestInfoNodeNameDetection(t *testing.T) {
+	info := []string{
+		"剩余流量：878.1 GB",
+		"距离下次重置剩余：22 天",
+		"套餐到期：2026-12-12",
+		"到期时间: 2026-01-01",
+		"官网 https://example.com",
+	}
+	for _, n := range info {
+		if !InfoNodeName(n) {
+			t.Fatalf("%q 应识别为信息节点", n)
+		}
+	}
+	real := []string{
+		"🇭🇰香港高速01|BGP|CMCU",
+		"🇯🇵日本专线03|BGP|流媒体",
+		"us-node-1",
+		"",
+	}
+	for _, n := range real {
+		if InfoNodeName(n) {
+			t.Fatalf("%q 被误判为信息节点", n)
+		}
+	}
+}
+
+func TestCleanNodesDropsInfoNodes(t *testing.T) {
+	// 真实机场形态：3 条信息节点 + 1 个真节点，四者连接参数完全相同
+	base := map[string]any{
+		"type": "vless", "server": "aws-link1.lxyun.xyz", "port": 443,
+		"uuid": "65165087-6d7b-4b57-9b6b-000000000000", "flow": "xtls-rprx-vision",
+	}
+	mk := func(name string) NodeSpec {
+		raw := cloneRaw(base)
+		raw["name"] = name
+		return NodeSpec{Name: name, Type: "vless", Server: "aws-link1.lxyun.xyz", Port: 443, Raw: raw}
+	}
+	nodes := []NodeSpec{
+		mk("剩余流量：878.1 GB"),
+		mk("🚀 距离下次重置剩余：22 天"),
+		mk("📅 套餐到期：2026-12-12"),
+		mk("🇭🇰香港高速01|BGP|CMCU"),
+	}
+	got := CleanNodes(nodes, ParseOptions{})
+	if len(got) != 1 {
+		t.Fatalf("期望只剩 1 个节点，得到 %d: %v", len(got), nodeNames(got))
+	}
+	if got[0].Name != "🇭🇰香港高速01|BGP|CMCU" {
+		t.Fatalf("留下的不是真节点: %q", got[0].Name)
+	}
+}
+
+func TestCleanNodesDedupKeepsFirst(t *testing.T) {
+	mk := func(name, server, uuid string) NodeSpec {
+		raw := map[string]any{
+			"name": name, "type": "vless", "server": server, "port": 443, "uuid": uuid,
+		}
+		return NodeSpec{Name: name, Type: "vless", Server: server, Port: 443, Raw: raw}
+	}
+	nodes := []NodeSpec{
+		mk("hk-1", "a.example.com", "uuid-1"),
+		mk("hk-1-duplicate", "a.example.com", "uuid-1"), // 同参数，不同名
+		mk("jp-1", "b.example.com", "uuid-2"),           // 不同参数
+	}
+	got := CleanNodes(nodes, ParseOptions{})
+	if len(got) != 2 {
+		t.Fatalf("期望去重后 2 个，得到 %d: %v", len(got), nodeNames(got))
+	}
+	if got[0].Name != "hk-1" {
+		t.Fatalf("应保留先出现的: %q", got[0].Name)
+	}
+}
+
+func TestCleanNodesKeepOptions(t *testing.T) {
+	mk := func(name string) NodeSpec {
+		raw := map[string]any{"name": name, "type": "ss", "server": "x", "port": 1}
+		return NodeSpec{Name: name, Type: "ss", Server: "x", Port: 1, Raw: raw}
+	}
+	nodes := []NodeSpec{mk("剩余流量：878 GB"), mk("hk-1"), mk("hk-1")}
+
+	// 保留信息节点 + 保留重复
+	got := CleanNodes(nodes, ParseOptions{KeepInfoNodes: true, KeepDuplicates: true})
+	if len(got) != 3 {
+		t.Fatalf("全保留时应 3 个，得到 %d", len(got))
+	}
+	// 即使保留重复，名字也要唯一
+	seen := map[string]bool{}
+	for _, n := range got {
+		if seen[n.Name] {
+			t.Fatalf("名字未唯一化: %q", n.Name)
+		}
+		seen[n.Name] = true
+	}
+}
+
+func TestCleanNodesRenamesIntoRaw(t *testing.T) {
+	// 重名节点被改名后，Raw 里的 name 必须同步，否则写进配置的还是旧名
+	raw1 := map[string]any{"name": "dup", "type": "ss", "server": "a", "port": 1}
+	raw2 := map[string]any{"name": "dup", "type": "ss", "server": "b", "port": 2}
+	nodes := []NodeSpec{
+		{Name: "dup", Type: "ss", Server: "a", Port: 1, Raw: raw1},
+		{Name: "dup", Type: "ss", Server: "b", Port: 2, Raw: raw2},
+	}
+	got := CleanNodes(nodes, ParseOptions{})
+	if len(got) != 2 {
+		t.Fatalf("期望 2 个，得到 %d", len(got))
+	}
+	if got[1].Raw["name"] != got[1].Name {
+		t.Fatalf("Raw name 未同步: Raw=%v Name=%q", got[1].Raw["name"], got[1].Name)
+	}
+	// 不应改动调用方传进来的原 map
+	if raw2["name"] != "dup" {
+		t.Fatal("污染了调用方的 Raw")
+	}
+}
+
+func nodeNames(ns []NodeSpec) []string {
+	out := make([]string, 0, len(ns))
+	for _, n := range ns {
+		out = append(out, n.Name)
+	}
+	return out
+}

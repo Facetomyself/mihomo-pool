@@ -1,8 +1,11 @@
 package mihomopool
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestOptionsNormalizeDefaults(t *testing.T) {
@@ -150,5 +153,92 @@ func TestLocalProxyURLByMode(t *testing.T) {
 		if got := o.localProxyURL(19000); got != c.want {
 			t.Fatalf("%s → %s，期望 %s", c.mode, got, c.want)
 		}
+	}
+}
+
+func TestListenerNameUniqueForChineseNames(t *testing.T) {
+	// 真实机场的节点名几乎全是中文/emoji。只做字符替换会让不同节点
+	// 产生相同 listener 名，内核直接 fatal 退出。这里用真实数据回归。
+	names := []string{
+		"🇺🇸美国高速01|CTCU|0.1x",
+		"🇬🇧英国伦敦01|CTCU|0.1x",
+		"🇨🇳台湾高速01|BGP|流媒体",
+		"🇺🇸美国洛杉矶01|流媒体|0.01x",
+		"🇸🇬新加坡专线01|BGP|流媒体",
+		"🇯🇵日本专线01|BGP|流媒体",
+		"🇭🇰香港高速01|BGP|CMCU",
+		"剩余流量：878.1 GB",
+		"距离下次重置剩余：22 天",
+		"套餐到期：2026-12-12",
+	}
+	seen := map[string]string{}
+	for _, n := range names {
+		l := listenerName(n)
+		if prev, dup := seen[l]; dup {
+			t.Fatalf("listener 名冲突: %q 与 %q 都映射到 %q", prev, n, l)
+		}
+		seen[l] = n
+		// 必须是 mihomo 接受的字符集
+		for _, r := range l {
+			ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == '-' || r == '_'
+			if !ok {
+				t.Fatalf("%q 的 listener 名含非法字符 %q: %s", n, r, l)
+			}
+		}
+		if len(l) > 64 {
+			t.Fatalf("listener 名过长 (%d): %s", len(l), l)
+		}
+	}
+}
+
+func TestListenerNameStable(t *testing.T) {
+	// 同一节点名必须每次得到同样的 listener 名，否则重载会改端口绑定
+	a := listenerName("🇭🇰香港高速01|BGP|CMCU")
+	b := listenerName("🇭🇰香港高速01|BGP|CMCU")
+	if a != b {
+		t.Fatalf("listener 名不稳定: %q vs %q", a, b)
+	}
+}
+
+func TestRenderConfigRealisticNodes(t *testing.T) {
+	// 用接近真实机场的一组节点跑一遍生成，确保无重复 listener
+	o := DefaultOptions()
+	o.WorkDir = t.TempDir()
+	o.BasePort = 20000
+	if err := o.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	var nodes []NodeSpec
+	for i := 0; i < 46; i++ {
+		nodes = append(nodes, NodeSpec{
+			Name: "🇺🇸美国高速" + fmt.Sprintf("%02d", i) + "|CTCU|0.1x",
+			Type: "vless", Server: "a.xyz", Port: 443,
+			Raw: map[string]any{"uuid": "u"},
+		})
+	}
+	text, bindings, err := o.renderConfig(nodes, nil)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if len(bindings) != 46 {
+		t.Fatalf("期望 46 条绑定，得到 %d", len(bindings))
+	}
+	// 解析回 YAML 检查 listeners 名字唯一
+	var parsed struct {
+		Listeners []listenerConfig `yaml:"listeners"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("解析生成配置失败: %v", err)
+	}
+	if len(parsed.Listeners) != 46 {
+		t.Fatalf("listeners 数量不对: %d", len(parsed.Listeners))
+	}
+	seen := map[string]bool{}
+	for _, l := range parsed.Listeners {
+		if seen[l.Name] {
+			t.Fatalf("listener 重名: %s", l.Name)
+		}
+		seen[l.Name] = true
 	}
 }

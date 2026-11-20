@@ -262,6 +262,17 @@ mihomo-pool status -bin /usr/local/bin/mihomo -dir /tmp/w
 也可以不给 `nodes`，直接给订阅地址 `subscription="https://..."`（或 CLI 的 `-sub`），
 由模块负责拉取和解析。
 
+## 真实订阅的自动清洗
+
+真实机场的订阅几乎都会塞两类脏数据，模块默认处理：
+
+| 情况 | 处理 | 关闭方式 |
+|---|---|---|
+| 信息节点（剩余流量、套餐到期、重置天数…） | 按关键词识别后丢弃 | `Pool(..., keep_info_nodes=True)` |
+| 连接参数完全相同的重复条目 | 按 server+port+uuid 指纹去重，保留首条 | `Pool(..., keep_duplicates=True)` |
+
+实测某机场 46 条 → 清洗后 40 条。
+
 ## 常见问题
 
 **Q: 提示"全部节点在飞已满"**

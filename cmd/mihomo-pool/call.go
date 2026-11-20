@@ -479,7 +479,7 @@ func startOrAttach(ctx context.Context, pool *mihomopool.Pool, noKernel bool, su
 		}
 		return nil, nil
 	}
-	nodes, lerr := loadNodes(ctx, subURL, nodesFile)
+	nodes, lerr := loadNodes(ctx, subURL, nodesFile, mihomopool.ParseOptions{})
 	if lerr != nil {
 		return nil, fmt.Errorf("加载节点失败: %w", lerr)
 	}
