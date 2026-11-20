@@ -413,6 +413,41 @@ func (p *Pool) ConfigureExecutor(workers, perNode int) {
 	p.exec.Configure(ExecutorConfig{Workers: workers, PerNode: perNode})
 }
 
+// Attach 连接一个已经在运行的内核，不启动进程。
+//
+// 用于「内核由别处托管、本进程只做请求分发」的场景（例如多语言客户端共用
+// 同一个 mihomo 实例）。节点与独立端口的映射来自控制面：
+// 同名节点的端口按 BasePort 起的顺序无法恢复，因此这里只用控制面信息，
+// 节点若没有独立端口则 ProxyURL 为空（只能走共享端口）。
+func (p *Pool) Attach(ctx context.Context) error {
+	p.mu.Lock()
+	if p.started {
+		p.mu.Unlock()
+		return errors.New("mihomo-pool: Pool 已启动")
+	}
+	p.mu.Unlock()
+
+	if err := p.ctl.Pinger(ctx); err != nil {
+		return fmt.Errorf("mihomo-pool: 控制面无响应: %w", err)
+	}
+
+	p.mu.Lock()
+	p.started = true
+	p.proxyBase = p.opts.localProxyURL(p.opts.SocksPort)
+	p.mu.Unlock()
+
+	// 没有 Bindings（进程不是我们起的），节点按名字反推端口不可靠，
+	// 这里只同步节点名与类型；需要独立端口请在配置侧固定 BasePort 顺序。
+	return p.syncNodes(ctx, 5)
+}
+
+// Running 判断是否已启动或已 attach。
+func (p *Pool) Running() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started
+}
+
 // WaitReady 阻塞到内核就绪（用于测试与启动编排）。
 func (p *Pool) WaitReady(ctx context.Context) error {
 	tick := time.NewTicker(100 * time.Millisecond)

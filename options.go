@@ -263,3 +263,6 @@ func exitErrorString(code int, sig string) string {
 	}
 	return "内核退出码 " + strconv.Itoa(code)
 }
+
+// Version 是库的语义化版本，CLI 与 Python 客户端据此做兼容判断。
+const Version = "1.0.0"

@@ -196,6 +196,70 @@ for _, d := range h.Detail {
 4. `PATH`
 5. Windows 额外尝试 `ProgramFiles/mihomo`、`Clash Verge/verge-mihomo.exe`
 
+## 给外部程序调用：CLI + Python
+
+除了作为 Go 库使用，本仓库还提供独立 CLI，供 Python 等语言调用。
+核心是 **常驻 JSONL 协议**：一次启动、多次调用、连接与节点延迟表跨请求复用。
+
+```bash
+go build -o /usr/local/bin/mihomo-pool ./cmd/mihomo-pool
+```
+
+### Python（推荐）
+
+```python
+import asyncio
+from mihomo_pool import Pool
+
+async def main():
+    async with Pool(binary_mihomo="/usr/local/bin/mihomo",
+                    nodes_file="nodes.json",
+                    workers=64, per_node=8) as pool:
+        results = await pool.map([f"https://e.com/{i}" for i in range(500)])
+        print(sum(1 for r in results if r.ok), "/", len(results))
+
+asyncio.run(main())
+```
+
+只依赖 Python 标准库。完整文档见 [python/README.md](python/README.md)，
+示例见 `python/examples/`。
+
+### 子命令
+
+| 命令 | 用途 |
+|---|---|
+| `serve` | 常驻 JSONL 服务（Python 主用） |
+| `call` | 单次请求 |
+| `batch` | 批量并发（stdin 支持 JSON 数组 / JSONL / 纯 URL 行） |
+| `start` | 启动内核并常驻，输出端口分配 |
+| `status` / `nodes` / `health` | 查状态、列节点、并发测速 |
+| `stop` | 按 PID 文件停掉托管进程 |
+
+```bash
+mihomo-pool call -nodes nodes.json https://example.com
+cat urls.txt | mihomo-pool batch -nodes nodes.json -workers 64 -per-node 8
+mihomo-pool status
+```
+
+全局参数放在子命令前后都支持：
+
+```bash
+mihomo-pool -bin /usr/local/bin/mihomo status
+mihomo-pool status -bin /usr/local/bin/mihomo
+```
+
+### 三层并发控制
+
+| 参数 | 位置 | 作用 |
+|---|---|---|
+| `workers` | Go | 同时执行的请求总数上限 |
+| `per_node` | Go | 单节点同时处理数上限 |
+| `max_inflight` | Go | 协议层背压，满了暂停读 stdin |
+| `concurrency` | Python | `map()` 里同时在飞的协程数 |
+
+协议细节（JSONL 格式、`body_b64`、`kind` 取值、版本协商）见
+[python/README.md](python/README.md) 的「协议细节」一节。
+
 ## 测试
 
 ```bash

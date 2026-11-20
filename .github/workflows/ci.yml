@@ -61,6 +61,29 @@ jobs:
           CGO_ENABLED: "0"
         run: go build ./...
 
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 客户端单测（对着桩程序跑协议）
+        working-directory: python
+        run: python -m unittest discover -s tests -v
+
+      - name: 资源泄漏检查
+        working-directory: python
+        run: python -W error::ResourceWarning -m unittest discover -s tests
+
+      - name: 语法检查
+        run: python -m compileall -q python
+
   integration:
     # 真实内核的集成测试：在 Linux 上装 mihomo 后强跑
     runs-on: ubuntu-latest

@@ -113,13 +113,47 @@ type ProxyItem struct {
 	UDP bool `json:"udp"`
 }
 
-// IsGroup 判断该条目是否为策略组/选择器而非真实节点。
+// builtinOutboundNames 是 mihomo 内置出站的名字。
+//
+// 它们会出现在 /proxies 里，但不是可用节点：没有远端服务器，也没有独立端口，
+// 派发给它们等于把请求交给规则引擎，出口不可控。
+const builtinOutboundNames = "DIRECT|REJECT|REJECT-DROP|PASS|PASS-RULE|COMPATIBLE|GLOBAL"
+
+// isBuiltinOutbound 判断名字是否为内置出站。
+func isBuiltinOutbound(name string) bool {
+	up := strings.ToUpper(strings.TrimSpace(name))
+	for _, b := range strings.Split(builtinOutboundNames, "|") {
+		if up == b {
+			return true
+		}
+	}
+	return false
+}
+
+// IsGroup 判断该条目是否为策略组/选择器/内置出站而非真实节点。
+//
+// 实测（mihomo v1.19.34）需要同时排除：
+//
+//	Selector / URLTest / Fallback / LoadBalance / Relay   策略组
+//	Direct / Reject / RejectDrop / Pass / PassRule        内置出站规则
+//	Compatible / Dns                                      占位出站
+//
+// 注意内置名是 "PASS-RULE"、类型是 "PassRule"（无连字符）。早期只列了 Pass，
+// 结果 PASS-RULE 被当成节点派发出去，请求走了不可控的规则出口。
 func (p ProxyItem) IsGroup() bool {
-	switch p.Type {
-	case "Selector", "URLTest", "Fallback", "LoadBalance", "Relay", "Direct", "Reject", "RejectDrop", "Pass", "Compatible", "Dns":
+	if len(p.All) > 0 {
 		return true
 	}
-	return len(p.All) > 0
+	if isBuiltinOutbound(p.Name) {
+		return true
+	}
+	switch p.Type {
+	case "Selector", "URLTest", "Fallback", "LoadBalance", "Relay",
+		"Direct", "Reject", "RejectDrop", "Pass", "PassRule",
+		"Compatible", "Dns":
+		return true
+	}
+	return false
 }
 
 // Delay 返回最近一次测速的历史延迟（毫秒），没有历史返回 -1。
