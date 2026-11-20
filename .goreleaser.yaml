@@ -40,6 +40,29 @@ builds:
     # 32 位与 mips 之类的平台不提供：mihomo 内核本身也不便在这些平台跑
     ignore: []
 
+  # 内嵌内核版：不需要外部 mihomo 二进制，单文件可分发。
+  # 体积约 45-50MB（含 mihomo + geodata），是 lite 版的 ~9 倍。
+  - id: mihomo-pool-embedded
+    main: ./cmd/mihomo-pool
+    binary: mihomo-pool-embedded
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+      - -tags=embedded
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{ .Version }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore: []
+
   # 演示程序可选发布，体积小，方便用户直接试
   - id: mihomo-pool-demo
     main: ./cmd/mihomo-pool-demo
@@ -69,6 +92,7 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
     ids:
       - mihomo-pool
+      - mihomo-pool-embedded
       - mihomo-pool-demo
     formats: [tar.gz]
     format_overrides:

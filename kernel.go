@@ -5,100 +5,114 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// 内核进程生命周期。
+// Kernel 管理内核运行时。
 //
-// 跨平台要点：
-//   - 进程组隔离由 proc_unix.go / proc_windows.go 各自实现，这里只调抽象
-//   - 优雅退出先发 TERM/CTRL_BREAK，超时再强杀
-//   - 内核异常退出后按 RestartBackoff 退避重启，次数受 MaxRestarts 限制
-//   - 崩溃时保留日志尾部，便于定位配置错误
-
-// Kernel 管理一个 mihomo 子进程。
+// 具体实现由 backend 决定：
+//   - 默认：mihomo 作为独立子进程（进程隔离、可崩溃重启）
+//   - -tags embedded：mihomo 链接进本进程（启动快、单文件分发）
+//
+// 两者对上层完全透明：Pool / Executor / CLI 都只看到 Kernel。
 type Kernel struct {
-	opts Options
+	opts    Options
+	backend backend
 
 	mu        sync.Mutex
-	cmd       *exec.Cmd
 	state     ProcessState
-	pid       int
 	startedAt time.Time
-	lastExit  string
 	restarts  int
-	logTail   *ringBuffer
+	logs      *ringBuffer
 
-	readyCh  chan struct{}
-	doneCh   chan struct{}
-	stopOnce sync.Once
-	closing  bool
+	readyCh chan struct{}
+	closing bool
 
 	configPath string
-	logPath    string
 	bindings   []listenerBinding
-}
-
-// KernelStatus 是 Kernel 的状态快照。
-type KernelStatus struct {
-	State      ProcessState
-	PID        int
-	StartedAt  time.Time
-	LastExit   string
-	Restarts   int
-	ConfigPath string
-	LogTail    []string
-	Binary     string
+	nodesSpec  []NodeSpec
+	providers  []ProviderSpec
 }
 
 // newKernel 构造（不启动）。
 func newKernel(o Options) *Kernel {
-	return &Kernel{
-		opts:    o,
-		state:   StateStopped,
-		logTail: newRingBuffer(200),
+	k := &Kernel{
+		opts:  o,
+		state: StateStopped,
+		logs:  newRingBuffer(200),
 	}
+	b, err := newBackend(o)
+	if err != nil {
+		return k
+	}
+	k.backend = b
+	k.backend.SetOnExit(k.onBackendExit)
+	return k
 }
 
-// resolveBinary 按搜索链找可执行文件。
-func (k *Kernel) resolveBinary() (string, error) {
-	if b := strings.TrimSpace(k.opts.Binary); b != "" {
-		if st, err := os.Stat(b); err == nil && !st.IsDir() {
-			return b, nil
-		}
-		return "", fmt.Errorf("mihomo-pool: Binary 指定为 %q 但文件不存在", b)
+// BackendName 返回当前构建使用的内核后端名（process / embedded）。
+func (k *Kernel) BackendName() string {
+	if k.backend == nil {
+		return "none"
 	}
-	cands := k.opts.SearchPaths
-	if len(cands) == 0 {
-		cands = defaultSearchPaths(&k.opts)
-	}
-	for _, c := range cands {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		if filepath.IsAbs(c) || strings.ContainsAny(c, `/\`) {
-			if st, err := os.Stat(c); err == nil && !st.IsDir() {
-				return c, nil
-			}
-			continue
-		}
-		if p, err := exec.LookPath(c); err == nil {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("mihomo-pool: 未找到 mihomo 内核，已尝试 %d 个位置（把可执行文件放到 %s 或设置 Options.Binary）",
-		len(cands), filepath.Join(k.opts.WorkDir, "bin"))
+	return k.backend.Name()
 }
 
-// Start 生成配置并拉起内核，阻塞到端口就绪。
+// onBackendExit 处理子进程异常退出，按退避重启。
+func (k *Kernel) onBackendExit(err error) {
+	k.mu.Lock()
+	if k.closing || k.state == StateStopping {
+		k.mu.Unlock()
+		return
+	}
+	restarts := k.restarts
+	if restarts >= k.opts.MaxRestarts {
+		k.state = StateCrashed
+		k.mu.Unlock()
+		return
+	}
+	k.restarts++
+	k.state = StateCrashed
+	nodes := k.nodesSpec
+	providers := k.providers
+	backoffN := k.restarts
+	k.mu.Unlock()
+
+	backoff := time.Duration(backoffN) * k.opts.RestartBackoff
+	go func() {
+		select {
+		case <-time.After(backoff):
+		case <-time.After(time.Duration(k.opts.MaxRestarts)*k.opts.RestartBackoff + time.Second):
+		}
+
+		text, bindings, rerr := k.opts.renderConfig(nodes, providers)
+		if rerr != nil {
+			return
+		}
+		path, werr := k.opts.writeConfig(text)
+		if werr != nil {
+			return
+		}
+		if serr := k.backend.Start(context.Background(), []byte(text), path); serr != nil {
+			return
+		}
+		k.mu.Lock()
+		k.configPath = path
+		k.bindings = bindings
+		k.state = StateRunning
+		k.mu.Unlock()
+	}()
+}
+
+// Start 生成配置并启动内核，阻塞到端口就绪。
 func (k *Kernel) Start(ctx context.Context, nodes []NodeSpec, providers []ProviderSpec) error {
+	if k.backend == nil {
+		return errors.New("mihomo-pool: 没有可用的内核后端")
+	}
+
 	k.mu.Lock()
 	if k.state == StateRunning || k.state == StateStarting {
 		k.mu.Unlock()
@@ -107,12 +121,6 @@ func (k *Kernel) Start(ctx context.Context, nodes []NodeSpec, providers []Provid
 	k.closing = false
 	k.state = StateStarting
 	k.mu.Unlock()
-
-	bin, err := k.resolveBinary()
-	if err != nil {
-		k.setState(StateStopped)
-		return err
-	}
 
 	text, bindings, err := k.opts.renderConfig(nodes, providers)
 	if err != nil {
@@ -125,210 +133,59 @@ func (k *Kernel) Start(ctx context.Context, nodes []NodeSpec, providers []Provid
 		return err
 	}
 
-	k.mu.Lock()
-	k.configPath = cfgPath
-	k.bindings = bindings
-	k.mu.Unlock()
-
-	if err := k.spawn(bin, cfgPath); err != nil {
+	if err := k.backend.Start(ctx, []byte(text), cfgPath); err != nil {
 		k.setState(StateStopped)
 		return err
 	}
 
-	ready := make(chan struct{})
 	k.mu.Lock()
-	k.readyCh = ready
+	k.configPath = cfgPath
+	k.bindings = bindings
+	k.nodesSpec = nodes
+	k.providers = providers
+	k.startedAt = time.Now()
 	k.mu.Unlock()
-
-	go k.waitExit()
 
 	if err := k.waitReady(ctx); err != nil {
 		_ = k.Stop(context.Background())
 		return err
 	}
-	return nil
-}
-
-// spawn 启动进程并接管输出。
-func (k *Kernel) spawn(bin, cfgPath string) error {
-	logPath := filepath.Join(k.opts.WorkDir, "mihomo.log")
-	if err := os.MkdirAll(k.opts.WorkDir, 0o755); err != nil {
-		return fmt.Errorf("mihomo-pool: 创建 WorkDir 失败: %w", err)
-	}
-	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("mihomo-pool: 打开日志失败: %w", err)
-	}
-
-	cmd := exec.Command(bin, "-d", k.opts.WorkDir, "-f", cfgPath)
-	cmd.Dir = k.opts.WorkDir
-	if len(k.opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), k.opts.Env...)
-	}
-	// 必须是 *os.File 本身：交给 io.Writer 时 os/exec 会建管道并起 copier，
-	// 而 copier 一旦遇到上游关闭就报 broken pipe，内核也会跟着起不来。
-	// 日志尾部不从这里旁路采集，改由 logTailFromFile 读文件。
-	cmd.Stdout = logf
-	cmd.Stderr = logf
-
-	applyProcAttrs(cmd)
-
-	if err := cmd.Start(); err != nil {
-		_ = logf.Close()
-		return fmt.Errorf("mihomo-pool: 启动内核失败: %w", err)
-	}
-	k.mu.Lock()
-	k.logPath = logPath
-	k.mu.Unlock()
-	// 子进程持有自己的句柄副本，父进程这份可以关
-	_ = logf.Close()
 
 	k.mu.Lock()
-	k.cmd = cmd
-	k.pid = cmd.Process.Pid
-	k.state = StateStarting
-	k.startedAt = time.Now()
+	k.state = StateRunning
+	k.restarts = 0
 	k.mu.Unlock()
 	return nil
 }
 
-// waitExit 等待进程退出并处理重启。
-func (k *Kernel) waitExit() {
-	k.mu.Lock()
-	cmd := k.cmd
-	k.mu.Unlock()
-	if cmd == nil {
-		return
-	}
-	err := cmd.Wait()
-
-	k.mu.Lock()
-	exitMsg := "内核正常退出"
-	if err != nil {
-		exitMsg = describeExit(err)
-	}
-	k.lastExit = exitMsg
-	k.pid = 0
-	k.cmd = nil
-	closing := k.closing
-	state := k.state
-	ready := k.readyCh
-	k.state = StateStopped
-	if ready != nil {
-		select {
-		case <-ready:
-		default:
-			close(ready)
-		}
-	}
-	done := k.doneCh
-	k.doneCh = nil
-	k.mu.Unlock()
-
-	if done != nil {
-		close(done)
-	}
-
-	// 主动停止或启动阶段失败：不重启
-	if closing || state == StateStopping {
-		return
-	}
-
-	k.mu.Lock()
-	restarts := k.restarts
-	k.mu.Unlock()
-	if restarts >= k.opts.MaxRestarts {
-		k.setState(StateCrashed)
-		return
-	}
-
-	backoff := time.Duration(restarts+1) * k.opts.RestartBackoff
-	k.mu.Lock()
-	k.restarts++
-	k.state = StateCrashed
-	k.mu.Unlock()
-
-	go func() {
-		select {
-		case <-time.After(backoff):
-		case <-k.stopping():
-			return
-		}
-		bin, err := k.resolveBinary()
-		if err != nil {
-			return
-		}
-		if err := k.spawn(bin, k.configPath); err != nil {
-			return
-		}
-		ready := make(chan struct{})
-		k.mu.Lock()
-		k.readyCh = ready
-		k.mu.Unlock()
-		go k.waitExit()
-		ctx, cancel := context.WithTimeout(context.Background(), k.opts.StartTimeout)
-		defer cancel()
-		_ = k.waitReady(ctx)
-	}()
-}
-
-// stopping 返回一个在 Stop 被调用时关闭的通道。
-func (k *Kernel) stopping() <-chan struct{} {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.readyCh == nil {
-		k.readyCh = make(chan struct{})
-	}
-	return k.readyCh
-}
-
-// waitReady 轮询到 SOCKS 端口与控制面端口都可用。
+// waitReady 轮询到端口可用。
 func (k *Kernel) waitReady(parent context.Context) error {
 	timeout := k.opts.StartTimeout
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	tick := time.NewTicker(120 * time.Millisecond)
+	tick := time.NewTicker(60 * time.Millisecond)
 	defer tick.Stop()
+
+	needSocks := len(k.Bindings()) > 0 || !k.opts.SkipSharedProbe
 
 	for {
 		select {
 		case <-ctx.Done():
-			k.mu.Lock()
-			exit := k.lastExit
-			tail := k.tailLog(15)
-			k.mu.Unlock()
+			tail := k.backend.LogTail(15)
 			msg := fmt.Sprintf("mihomo-pool: 等待内核就绪超时（%s）", timeout)
-			if exit != "" {
-				msg += "；" + exit
+			if le := k.backend.LastExit(); le != "" {
+				msg += "；" + le
 			}
 			if len(tail) > 0 {
 				msg += "；日志尾部: " + strings.Join(tail, " | ")
 			}
 			return errors.New(msg)
 		case <-tick.C:
-			k.mu.Lock()
-			state := k.state
-			pid := k.pid
-			k.mu.Unlock()
-			if pid == 0 && state != StateStarting {
+			if !k.backend.Running() {
 				return fmt.Errorf("mihomo-pool: 内核启动后立即退出: %s", k.exitMessage())
 			}
-			if portOpen(k.opts.APIPort) && (portOpen(k.opts.SocksPort) || len(k.Bindings()) == 0) {
-				k.mu.Lock()
-				k.state = StateRunning
-				k.restarts = 0
-				ready := k.readyCh
-				k.readyCh = nil
-				k.mu.Unlock()
-				if ready != nil {
-					// 用 doneCh 作为停止信号的替身：running 后 readyCh 置空
-					select {
-					case <-ready:
-					default:
-						close(ready)
-					}
-				}
+			if portOpen(k.opts.APIPort) && (!needSocks || portOpen(k.opts.SocksPort)) {
 				return nil
 			}
 		}
@@ -337,76 +194,33 @@ func (k *Kernel) waitReady(parent context.Context) error {
 
 // exitMessage 返回最近一次退出描述。
 func (k *Kernel) exitMessage() string {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.lastExit == "" {
+	if k.backend == nil {
 		return "未知原因"
 	}
-	return k.lastExit
+	if m := k.backend.LastExit(); m != "" {
+		return m
+	}
+	return "未知原因"
 }
 
-// Stop 优雅停止内核，超时强杀。
+// Stop 停止内核。
 func (k *Kernel) Stop(ctx context.Context) error {
 	k.mu.Lock()
-	if k.state == StateStopped && k.cmd == nil {
-		k.mu.Unlock()
-		return nil
-	}
 	k.closing = true
 	k.state = StateStopping
-	cmd := k.cmd
-	done := k.doneCh
 	k.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
-		k.setState(StateStopped)
-		return nil
-	}
-
-	if done == nil {
-		done = make(chan struct{})
-		k.mu.Lock()
-		k.doneCh = done
-		k.mu.Unlock()
-	}
-
-	if err := terminateProcess(cmd.Process); err != nil {
-		// TERM 发不出去就直接强杀
-		_ = cmd.Process.Kill()
-	}
-
-	timeout := k.opts.StopTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if d := time.Until(deadline); d > 0 && d < timeout {
-			timeout = d
-		}
-	}
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-		}
-	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+	if k.backend != nil {
+		_ = k.backend.Stop(ctx)
 	}
 
 	k.setState(StateStopped)
 	return nil
 }
 
-// Reload 用新配置重载运行中的内核（不重启进程）。
-//
-// 靠 SIGHUP（Windows 下走外部控制面 PUT /configs?force=false 的等价路径）。
+// Reload 用新配置重载。
 func (k *Kernel) Reload(nodes []NodeSpec, providers []ProviderSpec) error {
-	k.mu.Lock()
-	cmd := k.cmd
-	cfgPath := k.configPath
-	k.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if k.backend == nil || !k.backend.Running() {
 		return errors.New("mihomo-pool: 内核未运行，无法重载")
 	}
 
@@ -414,20 +228,19 @@ func (k *Kernel) Reload(nodes []NodeSpec, providers []ProviderSpec) error {
 	if err != nil {
 		return err
 	}
-	newPath, err := k.opts.writeConfig(text)
+	path, err := k.opts.writeConfig(text)
 	if err != nil {
 		return err
 	}
-	if newPath != cfgPath {
-		k.mu.Lock()
-		k.configPath = newPath
-		k.mu.Unlock()
-	}
+
 	k.mu.Lock()
+	k.configPath = path
 	k.bindings = bindings
+	k.nodesSpec = nodes
+	k.providers = providers
 	k.mu.Unlock()
 
-	return signalReload(cmd.Process)
+	return k.backend.Reload(context.Background(), []byte(text), path)
 }
 
 // Status 返回状态快照。
@@ -435,18 +248,21 @@ func (k *Kernel) Status() KernelStatus {
 	k.mu.Lock()
 	st := KernelStatus{
 		State:      k.state,
-		PID:        k.pid,
 		StartedAt:  k.startedAt,
-		LastExit:   k.lastExit,
 		Restarts:   k.restarts,
 		ConfigPath: k.configPath,
 	}
-	logPath := k.logPath
 	k.mu.Unlock()
 
-	// tailLog 自己会加锁，必须在解锁之后调用：
-	// sync.Mutex 不可重入，在持锁期间再进 tailLog 会直接死锁。
-	st.LogTail = k.tailLogFrom(logPath, 40)
+	if k.backend != nil {
+		st.PID = k.backend.PID()
+		st.LastExit = k.backend.LastExit()
+		st.LogTail = k.backend.LogTail(40)
+		st.Backend = k.backend.Name()
+	}
+	if st.LogTail == nil {
+		st.LogTail = k.logs.lines(40)
+	}
 	return st
 }
 
@@ -464,18 +280,6 @@ func (k *Kernel) setState(s ProcessState) {
 	k.mu.Lock()
 	k.state = s
 	k.mu.Unlock()
-}
-
-// describeExit 把 exec 退出错误整理成一行。
-func describeExit(err error) string {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		if sig := signalName(ee); sig != "" {
-			return "内核被信号终止: " + sig
-		}
-		return exitErrorString(ee.ExitCode(), "")
-	}
-	return "内核异常退出: " + err.Error()
 }
 
 // portOpen 探测本地 TCP 端口是否可连。
@@ -542,60 +346,9 @@ func (r *ringBuffer) lines(n int) []string {
 	if start < 0 {
 		start = 0
 	}
-	for _, l := range r.lines_[start:] {
-		out = append(out, l)
-	}
+	out = append(out, r.lines_[start:]...)
 	if s := strings.TrimSpace(string(r.cur)); s != "" && len(out) < n {
 		out = append(out, s)
-	}
-	return out
-}
-
-// tailLog 从日志文件尾部读取最近 n 行。
-//
-// 不再用内存环形缓冲旁路：stdout 必须直接交给 *os.File，
-// 否则 os/exec 会插一层管道 copier，异常时反而把内核拖死。
-func (k *Kernel) tailLog(n int) []string {
-	k.mu.Lock()
-	path := k.logPath
-	k.mu.Unlock()
-	return k.tailLogFrom(path, n)
-}
-
-// tailLogFrom 读取指定日志文件的尾部 n 行，不碰 k.mu。
-func (k *Kernel) tailLogFrom(path string, n int) []string {
-	if path == "" {
-		return k.logTail.lines(n)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	const maxRead = 64 << 10
-	st, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	size := st.Size()
-	off := int64(0)
-	if size > maxRead {
-		off = size - maxRead
-	}
-	buf := make([]byte, size-off)
-	if _, err := f.ReadAt(buf, off); err != nil && len(buf) == 0 {
-		return nil
-	}
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	out := make([]string, 0, len(lines))
-	for _, l := range lines {
-		if l = strings.TrimSpace(l); l != "" {
-			out = append(out, l)
-		}
 	}
 	return out
 }

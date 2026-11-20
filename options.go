@@ -96,6 +96,10 @@ type Options struct {
 
 	// Env 是额外的环境变量，形如 KEY=VALUE。为空时继承当前进程环境。
 	Env []string
+
+	// SkipSharedProbe 为 true 时就绪判定只看控制面端口，不看共享 SOCKS 端口。
+	// 用于共享端口被外部占用、只想用节点独立端口的场景。
+	SkipSharedProbe bool
 }
 
 // DefaultOptions 返回带默认值的选项。
@@ -266,3 +270,17 @@ func exitErrorString(code int, sig string) string {
 
 // Version 是库的语义化版本，CLI 与 Python 客户端据此做兼容判断。
 const Version = "1.0.0"
+
+// KernelStatus 是 Kernel 的状态快照。
+type KernelStatus struct {
+	State      ProcessState
+	PID        int
+	StartedAt  time.Time
+	LastExit   string
+	Restarts   int
+	ConfigPath string
+	LogTail    []string
+	Binary     string
+	// Backend 是内核后端名：process（子进程）或 embedded（链接进本进程）。
+	Backend string
+}

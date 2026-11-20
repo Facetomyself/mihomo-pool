@@ -129,6 +129,7 @@ func main() {
 		emit(map[string]any{
 			"ok":            true,
 			"cli_version":   cliVersion(),
+			"build":         buildFlavor(),
 			"protocol":      protocolVersion,
 			"lib_version":   mihomopool.Version,
 			"default_ports": defaultPortSummary(),
@@ -272,6 +273,11 @@ func trimNL(s string) string {
 func newReader() *bufio.Reader {
 	return bufio.NewReaderSize(os.Stdin, 1<<20)
 }
+
+// buildFlavor 返回构建形态：lite（外部内核）或 full（内嵌内核）。
+//
+// 由 build_flavor_*.go 里的常量决定，用户可用 version 子命令确认拿到的是哪个。
+func buildFlavor() string { return buildFlavorConst }
 
 // cliVersion 返回 CLI 版本：优先用注入值，否则回落到库版本。
 func cliVersion() string {

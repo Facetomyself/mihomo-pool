@@ -2,7 +2,6 @@ package mihomopool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -493,14 +492,6 @@ func TestTransportCacheKeyedByProxy(t *testing.T) {
 	}
 	if a.hits.Load() == 0 || b.hits.Load() == 0 {
 		t.Fatal("两个节点都应被用到")
-	}
-}
-
-var errBoom = errors.New("boom")
-
-func TestDescribeExit(t *testing.T) {
-	if got := describeExit(errBoom); !strings.Contains(got, "boom") {
-		t.Fatalf("describeExit 不对: %s", got)
 	}
 }
 

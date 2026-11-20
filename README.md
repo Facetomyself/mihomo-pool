@@ -2,13 +2,15 @@
 
 [![ci](https://github.com/Facetomyself/mihomo-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/Facetomyself/mihomo-pool/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Facetomyself/mihomo-pool.svg)](https://pkg.go.dev/github.com/Facetomyself/mihomo-pool)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 把 [mihomo](https://github.com/MetaCubeX/mihomo) 内核的多节点出站变成一组互不干扰的本地代理端口，供 Go / Python 程序做异步高并发请求分发。独立库，零上层依赖，Windows / macOS / Linux 通用。
 
-> **依赖关系**：本项目**调用** [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta）作为代理内核，
-> 以独立进程方式运行，不链接其代码。内核需要单独安装，见下方"安装"。
-> 关于把它编译进来的利弊，见 [内嵌内核说明](#关于内嵌内核的说明)。
+> **两种构建**：[lite](#两种构建lite-与-full) 调用外部 mihomo 二进制；
+> [full](#两种构建lite-与-full) 用 `-tags embedded` 把 [mihomo](https://github.com/MetaCubeX/mihomo)
+> 连同 geodata 一起编译进单文件，不需要在机器上装内核。
+>
+> **许可证**：GPL-3.0（内嵌版链接了 GPL-3.0 的 mihomo 与 meta-rules-dat）。
 
 > **AI 助手用：** 本仓库自带一份技能说明 [skills/mihomo-pool/SKILL.md](skills/mihomo-pool/SKILL.md)，
 > 用一句话讲清"这个工具解决什么问题、怎么用、真实机场有哪些坑"。把它加进你的 skills 目录即可被自动加载。
@@ -35,81 +37,101 @@ listeners:
 
 于是 N 个节点就是 N 个本地端口，`socks5://127.0.0.1:17900` 永远走 `hk-1`，互不牵扯。分发器只需把请求发到对应端口，不需要和内核的控制面抢状态。
 
-## 关于"内嵌内核"的说明
+## 两种构建：lite 与 full
 
-mihomo 本身是 Go 项目，理论上可以 `import` 进来当库用，不用外部二进制。
-**实测结论：能做，但这个项目默认不做**，理由如下（都是实测数据，不是估计）：
+本仓库提供**同一份代码的两种编译形态**，按需选：
 
-| 维度 | 外部二进制（当前方案） | 内嵌进 mihomo 库 |
+| | **lite**（默认） | **full / embedded** |
 |---|---|---|
-| 发布包体积 | 5 MB | **45–48 MB** |
-| 依赖数量 | 1 个（yaml.v3） | **170 个模块 / 736 条依赖边** |
-| 构建时间 | 秒级 | 数分钟 |
-| 内核启动 | 100ms~2s（子进程） | **17ms**（同进程） |
-| 崩溃影响 | 只死内核，主进程可重启 | **主进程一起挂** |
-| 配置调整 | 改文本后重载 | 直接改 `RawConfig` 对象 |
-| geodata | 内核工作目录自带 | **需自己准备 MMDB/GeoSite** |
-| 版本升级 | 换个二进制 | 重新编译 + 全量回归 |
+| 构建 | `go build ./cmd/mihomo-pool` | `go build -tags embedded ./cmd/mihomo-pool` |
+| 内核 | 外部 mihomo 二进制 | **链接进本进程** |
+| 需要装 mihomo | 是（55 MB） | **否** |
+| 单文件体积 | 8.9 MB | 58–61 MB |
+| 启动耗时 | 100 ms–2 s | **17 ms** |
+| 崩溃影响 | 只死内核，可自动重启 | 主进程一起挂 |
+| geodata | 内核 `-d` 目录自带 | **go:embed 打进二进制**，首次启动释放 |
+| 依赖模块 | 1 个（yaml.v3） | 171 个 |
 
-**内嵌确实可行的部分**（已实测跑通）：
+发布页同时提供两种产物：`mihomo-pool_*`（lite）和 `mihomo-pool-embedded_*`（full）。
+
+### 什么时候用哪个
+
+**用 lite：**
+- 机器上已经有 mihomo（或者用 Clash Verge / 其他客户端）
+- 想快速升级内核（换个二进制即可，不用重新编译）
+- 在意包体积
+- 需要崩溃隔离（内核挂了不影响主进程）
+
+**用 full：**
+- **不想装第二个程序**，要单文件分发
+- 容器/嵌入式环境，装内核麻烦
+- 对启动延迟敏感（17 ms vs 上秒级）
+- 需要程序化操纵配置对象
+
+### 内嵌版怎么用
+
+编译一次即可，用法与 lite 完全一致：
+
+```bash
+go build -tags embedded -o /usr/local/bin/mihomo-pool ./cmd/mihomo-pool
+
+# 不需要装 mihomo，也不需要 -bin
+mihomo-pool health -sub "https://airport.example/..."
+mihomo-pool serve -sub "..." -workers 64
+```
+
+`mihomo-pool version` 会显示 `1.0.0`，`status` 里 `backend=embedded`。
+
+### 内嵌版的技术要点
+
+如果要在自己代码里内嵌 mihomo，这三步是必须的（都是踩过的坑）：
 
 ```go
 import (
-    "github.com/metacubex/mihomo/config"
+    mihomoconfig "github.com/metacubex/mihomo/config"
     "github.com/metacubex/mihomo/constant"
-    "github.com/metacubex/mihomo/hub/executor"
+    "github.com/metacubex/mihomo/hub"
+    "github.com/sirupsen/logrus"
 )
 
-// 1. 内嵌后没有 -d 工作目录，必须自己指定 geodata 位置
-constant.SetHomeDir("/path/to/geodata")   // 放 geoip.metadb、GeoSite.dat
+// 1. geodata：内嵌后没有 -d 目录，GEOIP 规则找不到 MMDB 会直接失败。
+//    必须把 geoip.metadb / GeoSite.dat 放到 HomeDir 指向的目录。
+constant.SetHomeDir("/path/to/geodata")
 
-// 2. 解析成对象再改字段（改文本拼接会撞重复键）
-raw, _ := config.UnmarshalRawConfig(subYAML)
+// 2. 日志：mihomo 的 log init() 里是 logrus.SetOutput(os.Stdout)，
+//    内嵌后会污染你程序的 stdout（CLI 的 JSONL 协议会直接崩）。
+logrus.SetOutput(os.Stderr)
+
+// 3. 配置：不能拼 YAML（订阅里已有 mixed-port 等键，重复定义直接报错），
+//    要解析成 RawConfig 改字段。
+raw, _ := mihomoconfig.UnmarshalRawConfig(subYAML)
 raw.MixedPort = 17890
 raw.ExternalController = "127.0.0.1:17891"
-raw.Listeners = append(raw.Listeners, map[string]any{
-    "name": "out-hk", "type": "mixed", "port": 17900,
-    "listen": "127.0.0.1", "proxy": "hk-1",
-})
+cfg, _ := mihomoconfig.ParseRawConfig(raw)
 
-// 3. 构建并应用
-cfg, _ := config.ParseRawConfig(raw)
-executor.ApplyConfig(cfg, true)
+// 4. 必须走 hub.ApplyConfig 而不是 executor.ApplyConfig：
+//    前者才会启动 external-controller（applyRoute），
+//    只调 executor 的话控制面端口永不监听。
+hub.ApplyConfig(cfg)
+```
 
-// 4. 关闭（异步，需要等）
+关闭时要注意 `executor.Shutdown()` **只关 TUN**，入站监听器要自己关，
+否则端口会泄漏、重启会撞 `address already in use`：
+
+```go
+listener.PatchInboundListeners(map[string]constant.InboundListener{}, nil, true)
+listener.ReCreateMixed(0, nil)   // 以及 HTTP/SOCKS/Redir/TProxy
+route.ReCreateServer(&route.Config{})
 executor.Shutdown()
 ```
 
-实测数据（真实机场订阅，46 节点）：内嵌启动 17ms、解析 3.3ms、应用配置 364ms、
-20 并发真实请求 20/20 成功、出口 IP 正确。
+本实现已封装好这些，见 [embed.go](embed.go)。
 
-**为什么仍然默认用外部二进制：**
+### 许可证
 
-1. **体积涨 9 倍**。5 MB 的包对用户是零成本；45 MB 的包会让很多人犹豫。
-   而现在的方案用户本来就要装 mihomo 内核（55 MB），总占用其实差不多——
-   但"按需组合"比"强制捆绑"更灵活。
-2. **170 个依赖**意味着任何一条依赖爆 CVE 都要重新发版。外部二进制方案里，
-   mihomo 的安全更新由上游负责，我们只需换个二进制。
-3. **崩溃隔离**。mihomo 的 bug、OOM、DNS 死锁在内嵌方案里会直接带走主进程。
-   外部进程方案下内核挂了可以自动重启，主进程和请求队列都活着。
-4. **geodata 管理**。外部二进制用 `-d` 目录自带 MMDB；内嵌必须自己准备并
-   负责更新（GEOIP 规则缺 MMDB 会直接让 `ParseRawConfig` 失败，这个坑我踩过）。
-
-**什么情况下内嵌更好：**
-
-- 你要的是一个**单文件可分发的产品**（用户不想装第二个程序）
-- 你的并发/延迟极度敏感，100ms 的子进程启动开销不可接受
-- 你需要**程序化操纵配置对象**（例如按请求动态改 DNS、改规则），改文本做不到
-
-需要的话，可以做成 build tag 切换：
-
-```go
-//go:build embedded
-
-package mihomopool
-// 用 import mihomo 的实现
-```
-配合 `-tags embedded` 编译。这样默认轻量、需要时内嵌，不用二选一。
+本项目采用 **GPL-3.0**。内嵌版链接了 [mihomo](https://github.com/MetaCubeX/mihomo)（GPL-3.0）与
+[MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) 的 geodata（GPL-3.0），
+因此整体按 GPL-3.0 发布。lite 版本身不链接 mihomo，但为保持一致性同样按 GPL-3.0 分发。
 
 ## 安装
 

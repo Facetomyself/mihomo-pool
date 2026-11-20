@@ -1,3 +1,5 @@
+//go:build !embedded
+
 package mihomopool
 
 import (
@@ -25,7 +27,18 @@ func requireMihomo(t *testing.T) string {
 	t.Helper()
 	o := DefaultOptions()
 	o.WorkDir = t.TempDir()
-	bin, err := (&Kernel{opts: o}).resolveBinary()
+	if err := o.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	b, berr := newBackend(o)
+	if berr != nil {
+		t.Skipf("跳过：没有可用的内核后端（%v）", berr)
+	}
+	pb, ok := b.(*processBackend)
+	if !ok {
+		t.Skip("跳过：当前是无外部二进制后端")
+	}
+	bin, err := pb.resolveBinary()
 	if err != nil {
 		if os.Getenv("MIHOMO_POOL_INTEGRATION") == "1" {
 			t.Fatalf("集成测试要求 mihomo 内核: %v", err)
@@ -33,17 +46,6 @@ func requireMihomo(t *testing.T) string {
 		t.Skipf("跳过：未找到 mihomo 内核（%v）", err)
 	}
 	return bin
-}
-
-// freePort 找一个空闲端口。
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("找空闲端口失败: %v", err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
 
 // fakeSocks 启动一个极简 SOCKS5 服务器，记录被命中次数。

@@ -8,7 +8,7 @@ enabled: true
 
 # mihomo-pool：多节点独立端口池 + 异步高并发请求
 
-仓库：`https://github.com/Facetomyself/mihomo-pool`（MIT）
+仓库：`https://github.com/Facetomyself/mihomo-pool`（GPL-3.0）
 
 ## 什么时候用它，什么时候别用
 
@@ -37,7 +37,7 @@ N 个节点 = N 个本地端口。`socks5://127.0.0.1:17900` 永远是 `hk-1`，
 ## 安装
 
 ```bash
-# 1. mihomo 内核（必须有）
+# 1. mihomo 内核（只有 lite 版需要；full 版跳过这一步）
 curl -sL -o /tmp/mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/mihomo-linux-amd64-compatible-v1.19.34.gz
 gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
 mihomo -v    # Mihomo Meta v1.19.34
@@ -45,7 +45,13 @@ mihomo -v    # Mihomo Meta v1.19.34
 # 2. 本工具（CLI + Go 库同一个仓库）
 git clone https://github.com/Facetomyself/mihomo-pool
 cd mihomo-pool
+
+# 二选一：
+#   lite：8.9MB，需要上面装的 mihomo 内核
 go build -o /usr/local/bin/mihomo-pool ./cmd/mihomo-pool
+
+#   full：58-61MB 单文件，内核与 geodata 全部内嵌，不需要步骤 1
+go build -tags embedded -o /usr/local/bin/mihomo-pool ./cmd/mihomo-pool
 
 # 3. Python 客户端（纯标准库，无第三方依赖）
 export PYTHONPATH=/path/to/mihomo-pool/python:$PYTHONPATH

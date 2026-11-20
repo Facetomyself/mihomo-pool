@@ -71,6 +71,47 @@ jobs:
         run: go build ./...
 
 
+  embedded:
+    # 内嵌内核变体：不需要外部 mihomo 二进制，测试可以完整跑
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          # mihomo 有 170 个依赖，缓存对构建时间影响很大
+          cache: true
+
+      - name: vet (embedded)
+        run: go vet -tags embedded ./...
+
+      - name: test (embedded)
+        run: go test -tags embedded -count=1 -timeout 600s ./...
+
+      - name: 构建 embedded 二进制
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -tags embedded -ldflags="-s -w" -o /tmp/mihomo-pool-embedded ./cmd/mihomo-pool
+          ls -lh /tmp/mihomo-pool-embedded
+          # 内嵌版必须能在没有任何外部内核的机器上自报家门
+          unset MIHOMO_POOL_BINARY
+          /tmp/mihomo-pool-embedded version
+
+      - name: 端到端（无外部内核）
+        run: |
+          # 用一个不存在的 Binary 明确证明：内嵌版不依赖外部 mihomo
+          echo '[{"name":"n1","type":"socks5","server":"127.0.0.1","port":1}]' > /tmp/nodes.json
+          rm -rf /tmp/embwork
+          timeout 120 /tmp/mihomo-pool-embedded \
+            -dir /tmp/embwork -socks 51890 -api 51891 -base 51900 \
+            nodes -nodes /tmp/nodes.json | head -c 400
+          echo
+          timeout 60 /tmp/mihomo-pool-embedded \
+            -dir /tmp/embwork2 -socks 52890 -api 52891 -base 52900 \
+            status || true
+
   python:
     runs-on: ubuntu-latest
     strategy:

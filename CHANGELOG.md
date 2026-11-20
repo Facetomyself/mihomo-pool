@@ -24,12 +24,30 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **内嵌内核构建（`-tags embedded`）**：把 mihomo 与 geodata 一起编译进二进制，
+  运行时不依赖外部 mihomo。产物 58–61 MB，启动 17 ms，单文件可分发。
+  lite 与 full 共用同一份代码，`version` 输出里的 `build` 字段区分。
+- 发布页同时提供两种产物：`mihomo-pool_*`（lite）与 `mihomo-pool-embedded_*`（full）
+- 内核后端抽象（`backend` 接口）：`processBackend` / `embedBackend` 可切换，
+  上层 Pool / Executor / CLI 无感
+- CI 增加 embedded 任务：vet、测试、构建、无外部内核的端到端验证
+
+### 变更
+
+- **许可证 MIT → GPL-3.0**：内嵌版链接 mihomo（GPL-3.0）与 meta-rules-dat 的
+  geodata（GPL-3.0），整体按 GPL-3.0 发布；lite 版为一致性同样采用 GPL-3.0
+
 ### 文档
 
-- README 增加 [mihomo 仓库链接](https://github.com/MetaCubeX/mihomo) 与依赖关系说明
-- 新增"关于内嵌内核的说明"一节：实测把 mihomo 编译进来的可行性与代价
-  （体积 5MB→45MB、依赖 1→170、启动 2s→17ms、但失去崩溃隔离且需自备 geodata），
-  附可直接用的内嵌代码骨架与 build tag 切换思路
+- README 增加 [mihomo 仓库链接](https://github.com/MetaCubeX/mihomo) 与两种构建的对比表
+- 新增内嵌实现的技术要点（geodata、日志重定向、配置对象、applyConfig、关闭顺序）
+
+### 已知限制
+
+- 内嵌版编译时间显著变长（170 个依赖 × 6 平台），CI 用 Go module 缓存缓解
+- 内嵌版崩溃会带走主进程，无自动重启（`processBackend` 有）
 
 
 ## [1.0.0] - 2026-11-20
@@ -67,6 +85,15 @@
 - **stdout 接 `io.Writer` 导致内核起不来**：`os/exec` 插管道 copier，上游关闭即 broken pipe
 - **5xx 被当成功**：重试与直连兜底都不触发
 - **`Groups: []string{""}` 静默筛掉所有节点**
+
+### 内嵌实现踩到的坑（已修）
+
+- `executor.ApplyConfig` 不启动 external-controller，必须用 `hub.ApplyConfig`
+- `executor.Shutdown()` 只关 TUN，入站监听器需 `PatchInboundListeners(空map, dropOld=true)`
+  + `ReCreateMixed(0)` 显式关闭，否则端口泄漏、重启撞 `address already in use`
+- mihomo `log` 包 init 里 `logrus.SetOutput(os.Stdout)`，内嵌会污染 CLI 的 JSONL 协议
+- 拼接订阅 YAML 改配置会撞重复键（mixed-port 等），必须改 `RawConfig` 对象
+- 缺 geodata 时 GEOIP 规则让 `ParseRawConfig` 直接失败（`can't download MMDB`）
 
 ### 已知限制
 
