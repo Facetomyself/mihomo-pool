@@ -1,0 +1,23 @@
+# 构建产物
+/dist/
+/bin/
+*.exe
+*.test
+*.out
+
+# 运行期目录（demo 默认落在这里）
+/data/
+
+# 探针/临时日志
+_probe/
+_*.log
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Go 工作区（本地联调时可能生成）
+go.work
+go.work.sum
