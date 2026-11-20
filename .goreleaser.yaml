@@ -82,9 +82,17 @@ builds:
       - amd64
       - arm64
 
+# 两类产物分开打包。
+#
+# 不能把 lite 与 embedded 放进同一个 archive：那样 27MB 的包里混着两个
+# 二进制，用户既不知道自己下载了什么，也无法只取轻量版。
+# 分别出包后：
+#   mihomo-pool_<OS>_<ARCH>.tar.gz           lite   ~5MB   需外部内核
+#   mihomo-pool-embedded_<OS>_<ARCH>.tar.gz  full   ~28MB  内核内嵌
 archives:
-  # 用 uname 风格命名，方便用户一眼看出该下哪个
-  - name_template: >-
+  # —— lite：只含轻量二进制 ——
+  - id: lite
+    name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
@@ -92,13 +100,12 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
     ids:
       - mihomo-pool
-      - mihomo-pool-embedded
       - mihomo-pool-demo
     formats: [tar.gz]
     format_overrides:
       - goos: windows
         formats: [zip]
-    files:
+    files: &archive_files
       - LICENSE
       - README.md
       - CHANGELOG.md
@@ -109,6 +116,22 @@ archives:
       - python/README.md
       - python/examples/*.py
       - python/tests/*.py
+
+  # —— full：内嵌内核版 ——
+  - id: embedded
+    name_template: >-
+      {{ .ProjectName }}-embedded_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+    ids:
+      - mihomo-pool-embedded
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: *archive_files
 
 checksum:
   name_template: checksums.txt
