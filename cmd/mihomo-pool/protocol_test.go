@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"flag"
 	"os"
 	"strings"
 	"testing"
@@ -383,5 +384,36 @@ func TestApplyBatchDefaultsUniqueIDs(t *testing.T) {
 	}
 	if len(seen) != 4 {
 		t.Fatalf("应有 4 个唯一 id，得到 %d", len(seen))
+	}
+}
+
+func TestProbeCommandsAcceptSub(t *testing.T) {
+	// nodes / health 必须接受 -sub 与 -nodes，否则"给订阅直接查"
+	// 这个最基本的用法就断了（之前只支持连已运行内核）。
+	for _, cmd := range []string{"nodes", "health"} {
+		fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+		var cf commonFlags
+		cf.bind(fs)
+		sub := fs.String("sub", "", "")
+		nodesFile := fs.String("nodes", "", "")
+		if cmd == "nodes" {
+			fs.Bool("pretty", false, "")
+			fs.Bool("refresh", true, "")
+			fs.Bool("keep-info-nodes", false, "")
+			fs.Bool("keep-duplicates", false, "")
+		} else {
+			fs.Int("concurrency", 16, "")
+			fs.Bool("pretty", false, "")
+		}
+		args := []string{"-sub", "https://e.com/sub", "-nodes", "/tmp/n.json"}
+		if err := fs.Parse(args); err != nil {
+			t.Fatalf("%s 解析 -sub 失败: %v", cmd, err)
+		}
+		if *sub != "https://e.com/sub" {
+			t.Fatalf("%s 的 -sub 未生效: %q", cmd, *sub)
+		}
+		if *nodesFile != "/tmp/n.json" {
+			t.Fatalf("%s 的 -nodes 未生效: %q", cmd, *nodesFile)
+		}
 	}
 }

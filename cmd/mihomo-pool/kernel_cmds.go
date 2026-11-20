@@ -219,6 +219,8 @@ func runHealth(argv []string) int {
 	cf.bind(fs)
 	concurrency := fs.Int("concurrency", 16, "并发测速数")
 	pretty := fs.Bool("pretty", false, "缩进输出")
+	subURL := fs.String("sub", "", "订阅地址：拉取后直接起一个临时内核测速（用完即停）")
+	nodesFile := fs.String("nodes", "", "节点 JSON 文件")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -226,13 +228,11 @@ func runHealth(argv []string) int {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	pool, err := mihomopool.New(cf.toOptions())
+	pool, stop, err := openPool(ctx, cf.toOptions(), *subURL, *nodesFile, mihomopool.ParseOptions{})
 	if err != nil {
 		return fail(err.Error(), nil)
 	}
-	if err := pool.Attach(ctx); err != nil {
-		return fail("连接内核失败: "+err.Error(), nil)
-	}
+	defer stop()
 
 	hctx, hc := ctxWithTimeout(ctx, 3*time.Minute)
 	defer hc()
@@ -261,6 +261,10 @@ func runNodes(argv []string) int {
 	cf.bind(fs)
 	pretty := fs.Bool("pretty", false, "缩进输出")
 	refresh := fs.Bool("refresh", true, "先从控制面刷新")
+	subURL := fs.String("sub", "", "订阅地址：拉取后直接起一个临时内核查看（用完即停）")
+	nodesFile := fs.String("nodes", "", "节点 JSON 文件")
+	keepInfo := fs.Bool("keep-info-nodes", false, "保留机场信息节点")
+	keepDupes := fs.Bool("keep-duplicates", false, "保留重复节点")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -268,13 +272,12 @@ func runNodes(argv []string) int {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	pool, err := mihomopool.New(cf.toOptions())
+	pool, stop, err := openPool(ctx, cf.toOptions(), *subURL, *nodesFile,
+		mihomopool.ParseOptions{KeepInfoNodes: *keepInfo, KeepDuplicates: *keepDupes})
 	if err != nil {
 		return fail(err.Error(), nil)
 	}
-	if err := pool.Attach(ctx); err != nil {
-		return fail("连接内核失败: "+err.Error(), nil)
-	}
+	defer stop()
 	if *refresh {
 		_ = pool.RefreshNodes(ctx)
 	}
@@ -342,4 +345,39 @@ func jsonMarshalIndent(v any) ([]byte, error) {
 // jsonUnmarshal 是 encoding/json 的薄包装。
 func jsonUnmarshal(b []byte, v any) error {
 	return json.Unmarshal(b, v)
+}
+
+// openPool 按需决策：给了 -sub/-nodes 就自己托管一个临时内核，否则连已有内核。
+//
+// 这让 nodes/health 既是"查已运行内核"的工具，也能独立完成
+// "给我订阅地址，直接看节点和延迟"这个最常见的诉求——
+// 用户不应该为了看一眼节点先手动 start 一个内核。
+func openPool(ctx context.Context, o mihomopool.Options, subURL, nodesFile string,
+	po mihomopool.ParseOptions) (*mihomopool.Pool, func(), error) {
+
+	pool, err := mihomopool.New(o)
+	if err != nil {
+		return nil, func() {}, err
+	}
+
+	if subURL == "" && nodesFile == "" {
+		if aerr := pool.Attach(ctx); aerr != nil {
+			return nil, func() {}, fmt.Errorf("连接内核失败: %w（提示：给 -sub 或 -nodes 让它自己托管内核）", aerr)
+		}
+		return pool, func() {}, nil
+	}
+
+	nodes, lerr := loadNodes(ctx, subURL, nodesFile, po)
+	if lerr != nil {
+		return nil, func() {}, fmt.Errorf("加载节点失败: %w", lerr)
+	}
+	if serr := pool.Start(ctx, nodes, nil); serr != nil {
+		return nil, func() {}, fmt.Errorf("启动内核失败: %w", serr)
+	}
+	stop := func() {
+		sctx, sc := context.WithTimeout(context.Background(), 15*time.Second)
+		defer sc()
+		_ = pool.Stop(sctx)
+	}
+	return pool, stop, nil
 }

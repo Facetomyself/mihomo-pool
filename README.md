@@ -1,6 +1,13 @@
 # mihomo-pool
 
-把 mihomo 内核的多节点出站变成一组互不干扰的本地代理端口，供 Go 程序做异步高并发请求分发。独立库，零上层依赖，Windows / macOS / Linux 通用。
+[![ci](https://github.com/Facetomyself/mihomo-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/Facetomyself/mihomo-pool/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Facetomyself/mihomo-pool.svg)](https://pkg.go.dev/github.com/Facetomyself/mihomo-pool)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+把 mihomo 内核的多节点出站变成一组互不干扰的本地代理端口，供 Go / Python 程序做异步高并发请求分发。独立库，零上层依赖，Windows / macOS / Linux 通用。
+
+> **AI 助手用：** 本仓库自带一份技能说明 [skills/mihomo-pool/SKILL.md](skills/mihomo-pool/SKILL.md)，
+> 用一句话讲清"这个工具解决什么问题、怎么用、真实机场有哪些坑"。把它加进你的 skills 目录即可被自动加载。
 
 ## 为什么不是"单端口 + 切 selector"
 
