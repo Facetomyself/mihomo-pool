@@ -24,6 +24,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-20
+
 ### 新增
 
 - **订阅池**：多订阅统一编排、订阅级健康与熔断、权重配额、细粒度标签
@@ -134,6 +136,7 @@
   别处起的内核
 - 真实机场订阅无法进入公开 CI，真实节点验证只能人工跑
 
-[Unreleased]: https://github.com/Facetomyself/mihomo-pool/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Facetomyself/mihomo-pool/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Facetomyself/mihomo-pool/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Facetomyself/mihomo-pool/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Facetomyself/mihomo-pool/releases/tag/v1.0.0
