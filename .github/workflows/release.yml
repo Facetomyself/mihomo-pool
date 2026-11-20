@@ -100,13 +100,23 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           BASE="https://github.com/Facetomyself/mihomo-pool/releases/download/${TAG}"
-          curl -sL -o mp.tar.gz "${BASE}/mihomo-pool_Linux_x86_64.tar.gz"
-          curl -sL -o sums.txt "${BASE}/checksums.txt"
+          PKG="mihomo-pool_Linux_x86_64.tar.gz"
 
-          grep "mihomo-pool_Linux_x86_64.tar.gz" sums.txt > one.sha
+          # 必须用原名下载：checksums.txt 里记的是原始文件名，
+          # 存成别名（如 mp.tar.gz）会让 sha256sum -c 报 No such file。
+          curl -sfL -o "${PKG}" "${BASE}/${PKG}"
+          curl -sfL -o checksums.txt "${BASE}/checksums.txt"
+
+          # 只校验这一个包
+          grep " ${PKG}\$" checksums.txt > one.sha
+          if [ ! -s one.sha ]; then
+            echo "checksums.txt 里没有 ${PKG}"
+            cat checksums.txt
+            exit 1
+          fi
           sha256sum -c one.sha
 
-          tar xzf mp.tar.gz
+          tar xzf "${PKG}"
           chmod +x mihomo-pool
 
           echo "=== version ==="
@@ -132,8 +142,14 @@ jobs:
             http://example.com/ | head -c 300
           echo
 
-      - name: 冒烟失败时打印日志
+      - name: 冒烟失败时打印诊断
         if: failure()
         run: |
-          echo "--- dist ---"
-          ls -la dist/ 2>/dev/null | head -20
+          echo "--- 当前目录 ---"
+          ls -la
+          echo "--- checksums ---"
+          cat checksums.txt 2>/dev/null | head -10
+          echo "--- Release 资产 ---"
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
