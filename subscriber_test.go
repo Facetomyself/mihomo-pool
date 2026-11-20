@@ -216,13 +216,13 @@ func TestInfoNodeNameDetection(t *testing.T) {
 func TestCleanNodesDropsInfoNodes(t *testing.T) {
 	// 真实机场形态：3 条信息节点 + 1 个真节点，四者连接参数完全相同
 	base := map[string]any{
-		"type": "vless", "server": "aws-link1.lxyun.xyz", "port": 443,
+		"type": "vless", "server": "example-airport.test", "port": 443,
 		"uuid": "65165087-6d7b-4b57-9b6b-000000000000", "flow": "xtls-rprx-vision",
 	}
 	mk := func(name string) NodeSpec {
 		raw := cloneRaw(base)
 		raw["name"] = name
-		return NodeSpec{Name: name, Type: "vless", Server: "aws-link1.lxyun.xyz", Port: 443, Raw: raw}
+		return NodeSpec{Name: name, Type: "vless", Server: "example-airport.test", Port: 443, Raw: raw}
 	}
 	nodes := []NodeSpec{
 		mk("剩余流量：878.1 GB"),
