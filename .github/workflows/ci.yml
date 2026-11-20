@@ -11,21 +11,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # native: 与 runner 架构一致，可以跑 -race 与完整测试
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
-          - os: ubuntu-latest
-            goos: linux
-            goarch: arm64
+            native: true
           - os: macos-latest
             goos: darwin
             goarch: arm64
-          - os: macos-latest
-            goos: darwin
-            goarch: amd64
+            native: true
           - os: windows-latest
             goos: windows
             goarch: amd64
+            native: true
+          # 非 native: 只验证能编译出目标平台产物
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            native: false
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            native: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,28 +51,31 @@ jobs:
             exit 1
           fi
 
-      - name: vet
+      - name: vet (native only)
+        if: matrix.native
         run: go vet ./...
 
-      - name: test (race)
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
+      # -race 依赖 cgo 且必须在原生架构上跑：在 x86 runner 上设
+      # GOARCH=arm64 + CGO_ENABLED=1 会让链接器去汇编 ARM 指令集，直接
+      # "no such instruction: stp x29,x30"。所以只在 runner 原生架构上跑测试，
+      # 其它架构只做交叉编译。
+      - name: test (race, native only)
+        if: matrix.native
         run: go test -race -count=1 -timeout 300s ./...
 
-      - name: cross build
+      - name: build (cross)
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build ./...
 
+
   python:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
