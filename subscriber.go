@@ -422,7 +422,13 @@ func parseSS(link string) (NodeSpec, bool) {
 		}
 		cred, err := decodeBase64Flexible(userinfo)
 		if err != nil {
-			return NodeSpec{}, false
+			// SIP002 也允许不编码的 ss://method:password@host:port 写法，
+			// userinfo 里可能有 percent 编码的字符。
+			if un, uerr := url.PathUnescape(userinfo); uerr == nil && strings.Contains(un, ":") {
+				cred = []byte(un)
+			} else {
+				return NodeSpec{}, false
+			}
 		}
 		parts := strings.SplitN(string(cred), ":", 2)
 		if len(parts) != 2 {

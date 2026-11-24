@@ -630,6 +630,9 @@ class Pool:
         check: bool = False,
     ) -> Response:
         """发起一个请求，返回 Response。"""
+        # GET 带 json_body 没意义（绝大多数服务端忽略 GET body），自动改 POST
+        if json_body is not None and method.upper() == "GET":
+            method = "POST"
         payload: dict[str, Any] = {"op": "request", "url": url, "method": method}
 
         if headers:
@@ -777,6 +780,9 @@ def call(
 ) -> Response:
     """单次请求，起一个短命进程。慢但省心，适合脚本里偶尔用。"""
     exe = find_binary(binary)
+    # GET 带 json_body 没意义，自动改 POST
+    if json_body is not None and method.upper() == "GET":
+        method = "POST"
     cmd = [exe, "call", "-method", method, "-timeout", str(timeout_ms),
            "-retries", str(retries)]
     if binary_mihomo:
@@ -849,7 +855,9 @@ def batch(
         cmd.append("-no-kernel")
 
     payload = json.dumps(requests, ensure_ascii=False).encode("utf-8")
-    proc = subprocess.run(cmd, input=payload, capture_output=True, timeout=timeout_ms / 1000 * len(requests) + 300)
+    # 请求数很大时线性超时不可行，封顶一小时
+    proc = subprocess.run(cmd, input=payload, capture_output=True,
+                          timeout=min(timeout_ms / 1000 * len(requests) + 300, 3600))
     out = proc.stdout.decode("utf-8", errors="replace").strip()
     if not out:
         raise PoolError(

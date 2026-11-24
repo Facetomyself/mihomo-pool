@@ -131,14 +131,12 @@ func (q *quotaTracker) filterByQuota(candidates []*Node) []*Node {
 			blocked[sub] = true
 		}
 	}
-	total := q.total
 	q.mu.Unlock()
 
 	if len(blocked) == 0 {
 		return candidates
 	}
 
-	_ = total
 	out := make([]*Node, 0, len(candidates))
 	for _, n := range candidates {
 		if n != nil && blocked[n.Subscription] {

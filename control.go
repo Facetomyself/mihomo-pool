@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -387,19 +388,16 @@ func truncate(s string, n int) string {
 
 func sortProxyItems(items []ProxyItem) {
 	// 稳定排序：按延迟升序，未测速的排最后
-	for i := 1; i < len(items); i++ {
-		for j := i; j > 0; j-- {
-			a, b := items[j-1].Delay(), items[j].Delay()
-			if b < 0 {
-				break
-			}
-			if a < 0 || b < a {
-				items[j-1], items[j] = items[j], items[j-1]
-				continue
-			}
-			break
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i].Delay(), items[j].Delay()
+		if b < 0 {
+			return false
 		}
-	}
+		if a < 0 {
+			return true
+		}
+		return a < b
+	})
 }
 
 // DefaultDelayTestURL 是默认测速地址：极小的 204 响应，不产生业务流量。

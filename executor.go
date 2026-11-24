@@ -1,6 +1,7 @@
 package mihomopool
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,7 +36,7 @@ type Request struct {
 	Body []byte
 	// Timeout 单次请求超时，默认 20s。
 	Timeout time.Duration
-	// Retries 失败后重试次数，默认 1。
+	// Retries 失败后重试次数，默认 0（不重试）。
 	Retries int
 	// Filter 限定参与的节点。
 	Filter NodeFilter
@@ -83,6 +83,7 @@ type ExecutorConfig struct {
 	// PerNode 单节点最大在飞请求数，默认 4（0 表示不限）。
 	PerNode int
 	// Queue 任务缓冲长度，默认 Workers*4。
+	// 仅在构造时生效；Configure 不会再调整缓冲容量。
 	Queue int
 	// DefaultTimeout 单个请求的默认超时，默认 20s。
 	DefaultTimeout time.Duration
@@ -115,7 +116,7 @@ func (c *ExecutorConfig) normalize() {
 // Executor 是固定的 worker 池。
 type Executor struct {
 	pool *Pool
-	cfg  ExecutorConfig
+	cfg  atomic.Pointer[ExecutorConfig]
 
 	jobs   chan *task
 	wg     sync.WaitGroup
@@ -123,12 +124,12 @@ type Executor struct {
 
 	// 传输层缓存：同一个代理地址复用同一个 Transport，避免连接池碎片化
 	trMu sync.Mutex
-	trs  map[string]*http.Transport
+	trs  map[string]http.RoundTripper
 
 	// 在飞统计
 	inflight atomic.Int64
 
-	// wg/quit 管理 worker 池生命周期；mu 保护 quit 的重建
+	// wg/quit 管理 worker 池生命周期；mu 保护 quit 的重建与配置切换
 	mu   sync.Mutex
 	quit chan struct{}
 
@@ -140,6 +141,7 @@ type task struct {
 	req  *Request
 	out  chan<- *Response
 	done func(*Response)
+	ctx  context.Context
 }
 
 // newExecutor 构造执行器（worker 在第一次 Run/Start 时拉起）。
@@ -148,40 +150,50 @@ func newExecutor(p *Pool) *Executor {
 	cfg.normalize()
 	e := &Executor{
 		pool:  p,
-		cfg:   cfg,
-		trs:   make(map[string]*http.Transport),
+		trs:   make(map[string]http.RoundTripper),
 		quota: newQuotaTracker(),
 	}
+	e.cfg.Store(&cfg)
 	e.jobs = make(chan *task, cfg.Queue)
-	e.start()
+	e.mu.Lock()
+	e.startLocked()
+	e.mu.Unlock()
 	return e
 }
 
-// Configure 允许在首次使用前调整并发参数。
+// Configure 允许在空闲时调整并发参数。
 //
-// 调用时会重建队列与 worker 池，所以只能在空闲时调。
+// jobs 队列在整个生命周期内只有一条：重建队列会丢弃已缓冲的任务
+// 并让持有旧队列引用的生产者永久阻塞，所以这里只换配置与 worker 数。
 func (e *Executor) Configure(cfg ExecutorConfig) {
+	cfg.normalize()
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.closed.Load() || e.inflight.Load() > 0 {
 		return
 	}
-	cfg.normalize()
-	e.stopWorkers()
-	e.cfg = cfg
-	e.jobs = make(chan *task, cfg.Queue)
-	e.start()
+	e.stopLocked()
+	e.cfg.Store(&cfg)
+	e.startLocked()
 }
 
 // Start 确保 worker 已拉起。
 func (e *Executor) Start() {
-	e.start()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.startLocked()
 }
 
-func (e *Executor) start() {
-	e.wg.Add(e.cfg.Workers)
+func (e *Executor) startLocked() {
+	if e.quit != nil {
+		return
+	}
+	workers := e.cfg.Load().Workers
+	e.wg.Add(workers)
 	e.quit = make(chan struct{})
 	quit := e.quit
 	jobs := e.jobs
-	for i := 0; i < e.cfg.Workers; i++ {
+	for i := 0; i < workers; i++ {
 		go func() {
 			defer e.wg.Done()
 			for {
@@ -192,7 +204,11 @@ func (e *Executor) start() {
 					if !ok {
 						return
 					}
-					resp := e.execute(t.req)
+					ctx := t.ctx
+					if ctx == nil {
+						ctx = context.Background()
+					}
+					resp := e.executeWithContext(ctx, t.req)
 					if t.done != nil {
 						t.done(resp)
 					}
@@ -211,9 +227,14 @@ func (e *Executor) start() {
 // 关闭会直接 panic。worker 收到 quit 后把手上正在处理的请求做完再退出。
 func (e *Executor) stopWorkers() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stopLocked()
+}
+
+// stopLocked 关掉 worker 池；调用方必须持有 e.mu。
+func (e *Executor) stopLocked() {
 	quit := e.quit
 	e.quit = nil
-	e.mu.Unlock()
 	if quit == nil {
 		return
 	}
@@ -230,9 +251,11 @@ func (e *Executor) Close() {
 
 	e.trMu.Lock()
 	for _, tr := range e.trs {
-		tr.CloseIdleConnections()
+		if t, ok := tr.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
 	}
-	e.trs = make(map[string]*http.Transport)
+	e.trs = make(map[string]http.RoundTripper)
 	e.trMu.Unlock()
 }
 
@@ -253,8 +276,11 @@ func (e *Executor) Submit(ctx context.Context, req *Request) (<-chan *Response, 
 	if e.closed.Load() {
 		return nil, errors.New("mihomo-pool: Executor 已关闭")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	out := make(chan *Response, 1)
-	t := &task{req: req, out: out}
+	t := &task{req: req, out: out, ctx: ctx}
 	select {
 	case e.jobs <- t:
 		return out, nil
@@ -291,7 +317,7 @@ func (e *Executor) ForEach(ctx context.Context, reqs []*Request, fn func(*Respon
 				continue
 			}
 			ch := make(chan *Response, 1)
-			t := &task{req: r, out: ch}
+			t := &task{req: r, out: ch, ctx: ctx}
 			select {
 			case e.jobs <- t:
 				inbox <- pending{idx: i, ch: ch}
@@ -332,7 +358,7 @@ func (e *Executor) RunAsync(ctx context.Context, reqs []*Request) (<-chan *Respo
 	go func() {
 		defer close(out)
 		var wg sync.WaitGroup
-		sem := make(chan struct{}, e.cfg.Workers*2)
+		sem := make(chan struct{}, e.cfg.Load().Workers*2)
 		for _, r := range reqs {
 			if r == nil {
 				continue
@@ -350,11 +376,6 @@ func (e *Executor) RunAsync(ctx context.Context, reqs []*Request) (<-chan *Respo
 	return out, nil
 }
 
-// execute 在不带外部 ctx 的情况下执行（给 worker 用）。
-func (e *Executor) execute(req *Request) *Response {
-	return e.executeWithContext(context.Background(), req)
-}
-
 // executeWithContext 是真正的执行逻辑：选节点 → 建 transport → 发请求 → 失败重试换节点。
 func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Response {
 	start := time.Now()
@@ -370,8 +391,9 @@ func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Respon
 		method = http.MethodGet
 	}
 	timeout := req.Timeout
+	cfg := e.cfg.Load()
 	if timeout <= 0 {
-		timeout = e.cfg.DefaultTimeout
+		timeout = cfg.DefaultTimeout
 	}
 	retries := req.Retries
 	if retries < 0 {
@@ -391,7 +413,7 @@ func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Respon
 
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			wait := time.Duration(attempt) * e.cfg.RetryBackoff
+			wait := time.Duration(attempt) * cfg.RetryBackoff
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
@@ -410,39 +432,23 @@ func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Respon
 		}
 		pick, err := e.pickNode(pool, hashKey)
 		if err != nil {
-			// 没有可用节点：最后一轮且允许直连就直连兜底
-			if req.AllowDirect && attempt == retries {
-				out, derr := e.roundTrip(ctx, "", method, req, timeout, maxBody)
-				resp.Attempts = attempt + 1
-				resp.Node = "direct"
-				resp.Duration = time.Since(start)
-				if derr != nil {
-					resp.Err = derr
-					return resp
-				}
-				// 直连兜底的元信息必须带回，否则调用方看到的是空 Node
-				out.Attempts = resp.Attempts
-				out.Duration = resp.Duration
-				out.Tag = req.Tag
-				out.Node = "direct"
-				out.ProxyURL = ""
-				return out
-			}
 			lastErr = err
 			resp.Attempts = attempt + 1
 			continue
 		}
 
-		// 配额名额与在飞计数同生命周期
+		// 配额名额与在飞计数同生命周期；Acquire 失败也要配对，
+		// 否则 total 只减不增，配额上限会在长跑后漂移失效。
+		acquired := true
 		if e.quota != nil {
-			e.quota.Acquire(pick.Subscription)
+			acquired = e.quota.Acquire(pick.Subscription)
 		}
 		pick.inflight.Add(1)
 		e.inflight.Add(1)
 		out, perr := e.roundTrip(ctx, pick.ProxyURL, method, req, timeout, maxBody)
 		pick.inflight.Add(-1)
 		e.inflight.Add(-1)
-		if e.quota != nil {
+		if e.quota != nil && acquired {
 			e.quota.Release(pick.Subscription)
 		}
 
@@ -479,6 +485,23 @@ func (e *Executor) executeWithContext(ctx context.Context, req *Request) *Respon
 	if resp.Err == nil {
 		resp.Err = errors.New("mihomo-pool: 请求失败（所有节点）")
 	}
+
+	// 所有节点都失败时允许直连兜底：选不出节点与请求全失败都算。
+	if req.AllowDirect {
+		out, derr := e.roundTrip(ctx, "", method, req, timeout, maxBody)
+		if derr == nil && out != nil {
+			out.Tag = req.Tag
+			out.Node = "direct"
+			out.ProxyURL = ""
+			out.Attempts = resp.Attempts + 1
+			out.Duration = time.Since(start)
+			return out
+		}
+		resp.Attempts++
+		if derr != nil {
+			resp.Err = fmt.Errorf("mihomo-pool: 节点全部失败(%v)，直连也失败: %v", lastErr, derr)
+		}
+	}
 	resp.Duration = time.Since(start)
 	return resp
 }
@@ -492,15 +515,16 @@ func (e *Executor) pickNode(candidates []*Node, key string) (*Node, error) {
 		return nil, errors.New("mihomo-pool: 筛选后没有候选节点")
 	}
 	usable := candidates
-	if e.cfg.PerNode > 0 {
+	perNode := e.cfg.Load().PerNode
+	if perNode > 0 {
 		usable = make([]*Node, 0, len(candidates))
 		for _, n := range candidates {
-			if n.Inflight() < int64(e.cfg.PerNode) {
+			if n.Inflight() < int64(perNode) {
 				usable = append(usable, n)
 			}
 		}
 		if len(usable) == 0 {
-			return nil, fmt.Errorf("mihomo-pool: 全部节点在飞已满（每节点上限 %d）", e.cfg.PerNode)
+			return nil, fmt.Errorf("mihomo-pool: 全部节点在飞已满（每节点上限 %d）", perNode)
 		}
 	}
 
@@ -509,7 +533,7 @@ func (e *Executor) pickNode(candidates []*Node, key string) (*Node, error) {
 		usable = e.quota.filterByQuota(usable)
 	}
 
-	return e.pool.disp.Pick(usable, key)
+	return e.pool.disp.Load().Pick(usable, key)
 }
 
 // roundTrip 用指定代理发一次请求。
@@ -522,7 +546,7 @@ func (e *Executor) roundTrip(ctx context.Context, proxyURL, method string, req *
 
 	var bodyReader io.Reader
 	if len(req.Body) > 0 {
-		bodyReader = strings.NewReader(string(req.Body))
+		bodyReader = bytes.NewReader(req.Body)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -565,11 +589,12 @@ func (e *Executor) roundTrip(ctx context.Context, proxyURL, method string, req *
 	return out, nil
 }
 
-// transport 按代理地址拿一个缓存的 Transport。
+// transport 按代理地址拿一个缓存的 RoundTripper。
 //
 // 每个本地端口在 mihomo 里对应固定出站，所以按代理地址缓存是安全的：
 // 同一个端口永远走同一个节点。直连（空串）用无代理 Transport。
-func (e *Executor) transport(proxyURL string) (*http.Transport, error) {
+// cfg.Transport 返回的自定义 RoundTripper 按原样使用——它自己负责代理设置。
+func (e *Executor) transport(proxyURL string) (http.RoundTripper, error) {
 	e.trMu.Lock()
 	if tr, ok := e.trs[proxyURL]; ok {
 		e.trMu.Unlock()
@@ -577,45 +602,38 @@ func (e *Executor) transport(proxyURL string) (*http.Transport, error) {
 	}
 	e.trMu.Unlock()
 
-	var tr *http.Transport
-	if e.cfg.Transport != nil {
-		if rt := e.cfg.Transport(proxyURL); rt != nil {
-			if t, ok := rt.(*http.Transport); ok {
-				tr = t
-			} else {
-				// 非 *http.Transport 的自定义传输层：用默认 transport 包一层代理
-				tr = defaultTransport()
+	var rt http.RoundTripper
+	if cfg := e.cfg.Load(); cfg.Transport != nil {
+		rt = cfg.Transport(proxyURL)
+	}
+	if rt == nil {
+		tr := defaultTransport()
+		if strings.TrimSpace(proxyURL) != "" {
+			u, err := url.Parse(proxyURL)
+			if err != nil {
+				return nil, fmt.Errorf("mihomo-pool: 代理地址无效 %q: %w", proxyURL, err)
 			}
+			switch u.Scheme {
+			case "http", "https", "socks5", "socks5h":
+			default:
+				return nil, fmt.Errorf("mihomo-pool: 不支持的代理协议 %q", u.Scheme)
+			}
+			tr.Proxy = http.ProxyURL(u)
 		}
-	}
-	if tr == nil {
-		tr = defaultTransport()
-	}
-
-	if strings.TrimSpace(proxyURL) != "" {
-		u, err := url.Parse(proxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("mihomo-pool: 代理地址无效 %q: %w", proxyURL, err)
-		}
-		switch u.Scheme {
-		case "http", "https", "socks5", "socks5h":
-		default:
-			return nil, fmt.Errorf("mihomo-pool: 不支持的代理协议 %q", u.Scheme)
-		}
-		tr.Proxy = http.ProxyURL(u)
-	} else {
-		tr.Proxy = nil
+		rt = tr
 	}
 
 	e.trMu.Lock()
 	if old, ok := e.trs[proxyURL]; ok {
 		e.trMu.Unlock()
-		tr.CloseIdleConnections()
+		if t, ok := rt.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
 		return old, nil
 	}
-	e.trs[proxyURL] = tr
+	e.trs[proxyURL] = rt
 	e.trMu.Unlock()
-	return tr, nil
+	return rt, nil
 }
 
 // defaultTransport 返回一个适合高并发的 Transport。
@@ -646,13 +664,11 @@ type Stats struct {
 // Stats 返回统计快照。
 func (e *Executor) Stats() Stats {
 	return Stats{
-		Workers:  e.cfg.Workers,
+		Workers:  e.cfg.Load().Workers,
 		Queue:    int64(len(e.jobs)),
 		Inflight: e.inflight.Load(),
 	}
 }
-
-var _ = strconv.Itoa
 
 // relaxedCandidates 返回重试轮可用的候选。
 //

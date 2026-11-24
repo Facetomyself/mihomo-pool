@@ -143,6 +143,9 @@ func newNodeSet() *NodeSet {
 }
 
 // Replace 用新列表整体替换（保留同名节点的运行期统计）。
+//
+// 同名节点是换掉指针而不是原地改字段：读者手里的快照永远自洽，
+// 不需要与写者共用锁。统计值（在飞/成败计数）显式拷到新节点上。
 func (s *NodeSet) Replace(list []*Node) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -154,17 +157,15 @@ func (s *NodeSet) Replace(list []*Node) {
 			continue
 		}
 		if old, ok := s.nodes[n.Name]; ok {
-			// 保留统计，覆盖描述性字段
-			old.Type = n.Type
-			old.Group = n.Group
-			old.Provider = n.Provider
-			old.ProxyURL = n.ProxyURL
-			old.Port = n.Port
-			old.Alive = n.Alive
-			if n.DelayMS > 0 {
-				old.DelayMS = n.DelayMS
+			cp := cloneNode(n)
+			cp.inflight.Store(old.inflight.Load())
+			cp.okCount.Store(old.okCount.Load())
+			cp.failCount.Store(old.failCount.Load())
+			cp.lastFail.Store(old.lastFail.Load())
+			if cp.DelayMS <= 0 {
+				cp.DelayMS = old.DelayMS
 			}
-			next[n.Name] = old
+			next[n.Name] = cp
 		} else {
 			next[n.Name] = n
 		}
@@ -172,6 +173,43 @@ func (s *NodeSet) Replace(list []*Node) {
 	}
 	s.nodes = next
 	s.order = order
+}
+
+// update 对指定节点做写时复制式修改。
+//
+// 节点字段不原地改：Filter/Pick 等读路径不加锁，
+// 原地改 Alive/DelayMS/Tags 会与读者产生数据竞争。
+func (s *NodeSet) update(name string, mutate func(*Node)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.nodes[name]
+	if !ok {
+		return
+	}
+	cp := cloneNode(old)
+	mutate(cp)
+	s.nodes[name] = cp
+}
+
+// cloneNode 复制节点，运行期统计一并带走。
+func cloneNode(n *Node) *Node {
+	cp := &Node{
+		Name:         n.Name,
+		Type:         n.Type,
+		Group:        n.Group,
+		Provider:     n.Provider,
+		ProxyURL:     n.ProxyURL,
+		Port:         n.Port,
+		DelayMS:      n.DelayMS,
+		Alive:        n.Alive,
+		Subscription: n.Subscription,
+		Tags:         append([]string(nil), n.Tags...),
+	}
+	cp.inflight.Store(n.inflight.Load())
+	cp.okCount.Store(n.okCount.Load())
+	cp.failCount.Store(n.failCount.Load())
+	cp.lastFail.Store(n.lastFail.Load())
+	return cp
 }
 
 // All 返回全部节点的副本切片（按插入顺序）。
@@ -266,16 +304,14 @@ func (s *NodeSet) DelayAll(ctx context.Context, ctl *Control, names []string, te
 			d, err := ctl.Delay(ctx, nm, testURL, timeout)
 			if err != nil {
 				results[idx] = DelayResult{Node: nm, DelayMS: -1, Error: err.Error()}
-				if n, ok := s.Get(nm); ok {
-					n.Alive = false
-				}
+				s.update(nm, func(x *Node) { x.Alive = false })
 				return
 			}
 			results[idx] = DelayResult{Node: nm, DelayMS: d, OK: true}
-			if n, ok := s.Get(nm); ok {
-				n.DelayMS = d
-				n.Alive = true
-			}
+			s.update(nm, func(x *Node) {
+				x.DelayMS = d
+				x.Alive = true
+			})
 		}(i, name)
 	}
 	wg.Wait()

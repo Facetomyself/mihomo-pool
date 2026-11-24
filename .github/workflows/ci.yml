@@ -146,8 +146,10 @@ jobs:
           go-version: "1.23"
 
       - name: install mihomo
+        # 不带认证的 api.github.com 在 CI 上容易触发 rate limit（VER 为空→下载失败），
+        # 用内置 GITHUB_TOKEN 认证。
         run: |
-          VER=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+          VER=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep -oP '"tag_name": "\K[^"]+')
           curl -sL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${VER}/mihomo-linux-amd64-compatible-${VER}.gz"
           gunzip -f mihomo.gz
           chmod +x mihomo

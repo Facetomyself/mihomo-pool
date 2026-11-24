@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -118,6 +117,9 @@ func (o *Options) renderConfig(nodes []NodeSpec, providers []ProviderSpec) (stri
 		proxies = append(proxies, entry)
 
 		port := o.BasePort + i
+		if port == o.SocksPort || port == o.APIPort {
+			return "", nil, fmt.Errorf("mihomo-pool: 节点 %s 的端口 %d 与 SocksPort/APIPort 冲突", name, port)
+		}
 		bindings = append(bindings, listenerBinding{
 			Node:     name,
 			Port:     port,
@@ -224,7 +226,9 @@ func buildProvidersNode(providers []ProviderSpec) *yaml.Node {
 		body := map[string]any{
 			"type": "http",
 			"url":  p.URL,
-			"path": "./providers/" + sanitizeFileName(name) + ".yaml",
+			// 中文/emoji 的 provider 名 sanitize 后会退化成一堆下划线，
+			// 不带哈希后缀的话不同 provider 的缓存文件互相覆盖。
+			"path": fmt.Sprintf("./providers/%s-%08x.yaml", sanitizeFileName(name), fnvHash(name)),
 			"health-check": map[string]any{
 				"enable":   true,
 				"url":      firstNonEmpty(p.HealthCheckURL, "https://www.gstatic.com/generate_204"),
@@ -239,16 +243,8 @@ func buildProvidersNode(providers []ProviderSpec) *yaml.Node {
 		}
 		out[name] = body
 	}
-	keys := make([]string, 0, len(out))
-	for k := range out {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	ordered := map[string]any{}
-	for _, k := range keys {
-		ordered[k] = out[k]
-	}
-	return mustMarshalNode(ordered)
+	// yaml 编码 map 时键自动按序输出，无需手动排序
+	return mustMarshalNode(out)
 }
 
 // listenerName 把节点名转成合法的 listener 名。

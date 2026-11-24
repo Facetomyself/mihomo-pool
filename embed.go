@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,9 @@ type embedBackend struct {
 
 	onExit   func(error)
 	stopping atomic.Bool
+
+	// prevLogOut 是接管 logrus 之前的输出目标，Stop 时恢复
+	prevLogOut io.Writer
 
 	logMu  sync.Mutex
 	logSub *observable.Subscription[log.Event]
@@ -123,16 +127,13 @@ func (b *embedBackend) Start(ctx context.Context, cfg []byte, cfgPath string) er
 
 	// 内核的路径解析以 HomeDir 为根；不设就落到 $HOME/.config/mihomo，
 	// 那里通常没有 MMDB。
-	prevHome := constant.Path.HomeDir()
 	constant.SetHomeDir(geoDir)
-	defer func() {
-		// 保持 HomeDir 指向我们的目录，便于后续 Reload
-		_ = prevHome
-	}()
 
 	// 关键：mihomo 的 log 包 init() 里是 logrus.SetOutput(os.Stdout)，
 	// 内嵌后会直接写进本进程 stdout，把 CLI 的 JSONL 协议污染掉。
 	// log 包没有重导出 SetOutput，这里直接操作同一个 logrus 单例改到 stderr。
+	// 这是全局状态，会影响宿主进程的 logrus 输出；Stop 时恢复。
+	b.prevLogOut = logrus.StandardLogger().Out
 	logrus.SetOutput(os.Stderr)
 
 	// 内核日志通过 observable 订阅拿到，不是 Handler 接口
@@ -287,21 +288,27 @@ func (b *embedBackend) Stop(ctx context.Context) error {
 		executor.Shutdown()
 	}()
 
-	// 等端口真正释放
+	// 等端口真正释放；ctx 取消时提前放弃等待（select 里的 break
+	// 只退 select 不退循环，所以要用显式标志）。
 	deadline := time.Now().Add(b.opts.StopTimeout)
-	for time.Now().Before(deadline) {
+	done := false
+	for !done && time.Now().Before(deadline) {
 		if !portOpen(b.opts.SocksPort) && !portOpen(b.opts.APIPort) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			break
+			done = true
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 
 	b.mu.Lock()
 	b.running = false
+	if b.prevLogOut != nil {
+		logrus.SetOutput(b.prevLogOut)
+		b.prevLogOut = nil
+	}
 	b.mu.Unlock()
 	_, _ = fmt.Fprintf(b.logs, "embedded kernel stopped\n")
 	return nil

@@ -89,7 +89,7 @@ func newTestPool(t *testing.T, nodes []*Node, strategy Strategy) *Pool {
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
-	p.disp = d
+	p.disp.Store(d)
 	p.exec = newExecutor(p)
 	t.Cleanup(func() { p.exec.Close() })
 	p.nodes.Replace(nodes)

@@ -231,13 +231,13 @@ func (f *subpoolFlags) build() (*mihomopool.SubscriptionPool, error) {
 //
 // 后两种会把全局参数插到动作前面，所以必须先剥离它们再取动作。
 func runSubpool(argv []string) int {
-	action, rest, _ := splitSubAction(argv)
+	action, rest, globals := splitSubAction(argv)
 	if action == "" {
 		return fail("需要子动作: list | refresh | nodes | check", nil)
 	}
-	// 全局参数重新拼回 rest 尾部：各子命令自己注册了 commonFlags，
+	// 全局参数重新拼回 rest 尾部：各子命令都注册了 commonFlags，
 	// 能解析它们；拼回尾部保证不影响子参数的取值。
-	argv = rest
+	argv = append(rest, globals...)
 
 	switch action {
 	case "list":
@@ -320,6 +320,9 @@ func subpoolList(argv []string) int {
 	fs := flag.NewFlagSet("subpool list", flag.ContinueOnError)
 	var f subpoolFlags
 	f.bind(fs)
+	// list 不启动内核，commonFlags 只为了让全局参数语法可用
+	var cf commonFlags
+	cf.bind(fs)
 	file := fs.String("file", "", "从 JSON 文件读订阅定义")
 	refresh := fs.Bool("refresh", false, "先刷新再列出")
 	pretty := fs.Bool("pretty", false, "缩进输出")
@@ -362,6 +365,9 @@ func subpoolRefresh(argv []string) int {
 	fs := flag.NewFlagSet("subpool refresh", flag.ContinueOnError)
 	var f subpoolFlags
 	f.bind(fs)
+	// 同上：不启动内核，只为接受全局参数语法
+	var cf commonFlags
+	cf.bind(fs)
 	file := fs.String("file", "", "从 JSON 文件读订阅定义")
 	pretty := fs.Bool("pretty", false, "缩进输出")
 	if err := fs.Parse(argv); err != nil {
@@ -393,6 +399,9 @@ func subpoolNodes(argv []string) int {
 	fs := flag.NewFlagSet("subpool nodes", flag.ContinueOnError)
 	var f subpoolFlags
 	f.bind(fs)
+	// 同上：不启动内核，只为接受全局参数语法
+	var cf commonFlags
+	cf.bind(fs)
 	file := fs.String("file", "", "从 JSON 文件读订阅定义")
 	region := fs.String("region", "", "只要某地区（HK/JP/US…），逗号分隔")
 	rate := fs.String("rate", "", "只要某倍率（0.1 表示 ≤0.1），-1 表示只要不限速")
