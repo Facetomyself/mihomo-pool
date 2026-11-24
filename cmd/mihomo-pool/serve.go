@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mihomopool "github.com/Facetomyself/mihomo-pool"
@@ -114,8 +115,8 @@ func runServe(argv []string) int {
 		outMu:       &sync.Mutex{},
 		writer:      bufio.NewWriterSize(os.Stdout, 1<<20),
 		idleTimeout: idleTimeout,
-		done:        make(chan struct{}),
 	}
+	s.touch()
 
 	// 握手：告诉 Python 端协议版本、内核状态、可用节点
 	st := pool.Status(ctx)
@@ -140,6 +141,10 @@ func runServe(argv []string) int {
 		},
 	})
 	s.flush()
+
+	if idleTimeout > 0 {
+		go s.idleWatch(ctx)
+	}
 
 	s.serveLoop(ctx)
 	s.waitInflight()
@@ -229,11 +234,10 @@ type server struct {
 	outMu       *sync.Mutex
 	writer      *bufio.Writer
 	idleTimeout time.Duration
-	done        chan struct{}
 
-	inflightMu   sync.Mutex
 	inflightWG   sync.WaitGroup
-	lastActivity time.Time
+	inflightN    atomic.Int64
+	lastActivity atomic.Int64 // unix nano
 }
 
 // send 序列化并写出一行，整行原子。
@@ -266,6 +270,7 @@ func (s *server) serveLoop(ctx context.Context) {
 		if line == "" {
 			continue
 		}
+		s.touch()
 		select {
 		case <-ctx.Done():
 			return
@@ -391,6 +396,9 @@ func (s *server) handle(ctx context.Context, msg *requestMsg) bool {
 }
 
 // dispatchRequest 把请求交给执行器并发执行，结果异步写回。
+//
+// 走 Submit 而不是 Do：Do 在调用方 goroutine 内联执行，会让并发度脱离
+// worker 池控制（-workers 失效，实际只被 max-inflight 约束）。
 func (s *server) dispatchRequest(ctx context.Context, msg *requestMsg) {
 	lreq, err := msg.toLibraryRequest()
 	if err != nil {
@@ -405,16 +413,59 @@ func (s *server) dispatchRequest(ctx context.Context, msg *requestMsg) {
 		return
 	}
 
+	out, err := s.pool.Executor().Submit(ctx, lreq)
+	if err != nil {
+		<-s.sem
+		s.send(&responseMsg{ID: msg.ID, Op: "request", Kind: "err", OK: false, Error: err.Error()})
+		s.flush()
+		return
+	}
+
 	s.inflightWG.Add(1)
+	s.inflightN.Add(1)
 	go func() {
 		defer s.inflightWG.Done()
+		defer s.inflightN.Add(-1)
 		defer func() { <-s.sem }()
+		defer s.touch()
 
-		resp := s.pool.Executor().Do(ctx, lreq)
-		out := fromLibraryResponse(msg.ID, resp)
-		s.send(out)
+		resp := <-out
+		s.send(fromLibraryResponse(msg.ID, resp))
 		s.flush()
 	}()
+}
+
+// touch 记录最近一次活动时间，idleWatch 用它判断空闲。
+func (s *server) touch() {
+	s.lastActivity.Store(time.Now().UnixNano())
+}
+
+// idleWatch 空闲超过 -idle-timeout 时让服务自动退出。
+//
+// 退出走正常收尾路径：关闭 stdin 让 serveLoop 返回 → waitInflight 收尾 →
+// flush → runServe 的 defer 里 pool.Stop 停内核。stdin 关闭不解除阻塞时
+// 由兜底定时器强退。
+func (s *server) idleWatch(ctx context.Context) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if s.inflightN.Load() > 0 {
+				continue
+			}
+			idleFor := time.Since(time.Unix(0, s.lastActivity.Load()))
+			if idleFor < s.idleTimeout {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "mihomo-pool: 空闲超过 %s，自动退出\n", s.idleTimeout)
+			_ = os.Stdin.Close()
+			time.AfterFunc(15*time.Second, func() { os.Exit(0) })
+			return
+		}
+	}
 }
 
 // waitInflight 等所有在途请求收尾。

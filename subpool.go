@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -500,14 +501,16 @@ func (p *SubscriptionPool) attachMeta(pool *Pool) {
 	}
 
 	for _, n := range pool.nodes.All() {
-		if src, ok := meta[n.Name]; ok {
-			n.Subscription = src.Subscription
-			n.Tags = src.Tags
-		}
-		// 兜底：即使匹配不上，也按名字推断标签
-		if len(n.Tags) == 0 {
-			n.Tags = ExtractTags(n.Name, n.Type)
-		}
+		pool.nodes.update(n.Name, func(x *Node) {
+			if src, ok := meta[x.Name]; ok {
+				x.Subscription = src.Subscription
+				x.Tags = src.Tags
+			}
+			// 兜底：即使匹配不上，也按名字推断标签
+			if len(x.Tags) == 0 {
+				x.Tags = ExtractTags(x.Name, x.Type)
+			}
+		})
 	}
 }
 
@@ -641,21 +644,30 @@ func mergeHeader(base, extra map[string]string) map[string]string {
 }
 
 // maskURL 把 URL 里的敏感部分打码，用于对外展示。
+//
+// 机场订阅的 token 常见两种位置：query 参数和 path 段。
+// 只打码 query 会把 path 里的 token 前 28 个字符露出来，这里两者都打码，
+// 对外只保留 scheme + host。
 func maskURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	u := raw
-	if i := strings.IndexAny(u, "?"); i > 0 {
-		// 保留 host+path，query 打码但给个长度提示
-		q := u[i+1:]
-		return u[:i] + "?<" + fmt.Sprint(len(q)) + " chars>"
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid url>"
 	}
-	// 没 query 时保留前 24 个字符
-	if len(u) > 32 {
-		return u[:28] + "…"
+	host := u.Host
+	if u.User != nil {
+		host = "***@" + u.Host
 	}
-	return u
+	out := u.Scheme + "://" + host
+	if p := u.EscapedPath(); p != "" && p != "/" {
+		out += fmt.Sprintf("/<%d chars>", len(p))
+	}
+	if u.RawQuery != "" {
+		out += fmt.Sprintf("?<%d chars>", len(u.RawQuery))
+	}
+	return out
 }
 
 // SortInfosByWeight 按有效权重降序排序，便于观察调度倾向。

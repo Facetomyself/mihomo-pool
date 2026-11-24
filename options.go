@@ -12,7 +12,6 @@
 package mihomopool
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,6 +79,7 @@ type Options struct {
 	APIRequestTimeout time.Duration
 
 	// APIRetries 是控制面请求的失败重试次数（不含首次）。默认 2。
+	// 0 表示使用默认值；负数（如 -1）表示禁用重试。
 	APIRetries int
 
 	// StartTimeout 是等待内核端口就绪的上限。默认 20s。
@@ -184,8 +184,8 @@ func (o *Options) normalize() error {
 	if o.SocksPort == o.APIPort {
 		return fmt.Errorf("mihomo-pool: SocksPort 与 APIPort 不能相同（都是 %d）", o.SocksPort)
 	}
-	if o.BasePort == 0 {
-		return errors.New("mihomo-pool: BasePort 不能为 0")
+	if o.BasePort == o.SocksPort || o.BasePort == o.APIPort {
+		return fmt.Errorf("mihomo-pool: BasePort 与 SocksPort/APIPort 冲突（%d）", o.BasePort)
 	}
 	if o.WorkDir == "" {
 		o.WorkDir = defaultWorkDir()

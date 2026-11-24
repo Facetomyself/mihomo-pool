@@ -30,6 +30,7 @@ type Kernel struct {
 
 	readyCh chan struct{}
 	closing bool
+	gen     uint64 // 每次 Start 递增；崩溃重启协程据此发现自己已过期
 
 	configPath string
 	bindings   []listenerBinding
@@ -79,14 +80,23 @@ func (k *Kernel) onBackendExit(err error) {
 	nodes := k.nodesSpec
 	providers := k.providers
 	backoffN := k.restarts
+	gen := k.gen
 	k.mu.Unlock()
 
 	backoff := time.Duration(backoffN) * k.opts.RestartBackoff
 	go func() {
-		select {
-		case <-time.After(backoff):
-		case <-time.After(time.Duration(k.opts.MaxRestarts)*k.opts.RestartBackoff + time.Second):
+		timer := time.NewTimer(backoff)
+		<-timer.C
+		timer.Stop()
+
+		// 退避期间可能被 Stop / 重新 Start：状态或代次变了就放弃本次重启，
+		// 否则会起出一个没人管的僵尸内核，还可能与新内核抢端口。
+		k.mu.Lock()
+		if k.closing || k.state != StateCrashed || k.gen != gen {
+			k.mu.Unlock()
+			return
 		}
+		k.mu.Unlock()
 
 		text, bindings, rerr := k.opts.renderConfig(nodes, providers)
 		if rerr != nil {
@@ -100,6 +110,12 @@ func (k *Kernel) onBackendExit(err error) {
 			return
 		}
 		k.mu.Lock()
+		if k.closing || k.state != StateCrashed || k.gen != gen {
+			// 启动期间被接管：把刚起的后端停掉，不留下孤儿内核进程
+			k.mu.Unlock()
+			_ = k.backend.Stop(context.Background())
+			return
+		}
 		k.configPath = path
 		k.bindings = bindings
 		k.state = StateRunning
@@ -120,6 +136,7 @@ func (k *Kernel) Start(ctx context.Context, nodes []NodeSpec, providers []Provid
 	}
 	k.closing = false
 	k.state = StateStarting
+	k.gen++
 	k.mu.Unlock()
 
 	text, bindings, err := k.opts.renderConfig(nodes, providers)
@@ -167,7 +184,9 @@ func (k *Kernel) waitReady(parent context.Context) error {
 	tick := time.NewTicker(60 * time.Millisecond)
 	defer tick.Stop()
 
-	needSocks := len(k.Bindings()) > 0 || !k.opts.SkipSharedProbe
+	// SkipSharedProbe 为 true 时只看控制面端口；共享端口可能被外部占用，
+	// 即使带了节点端口也不能用它做就绪判定。
+	needSocks := !k.opts.SkipSharedProbe
 
 	for {
 		select {

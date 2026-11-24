@@ -154,7 +154,7 @@ type Pool struct {
 	kernel *Kernel
 	ctl    *Control
 	nodes  *NodeSet
-	disp   *Dispatcher
+	disp   atomic.Pointer[Dispatcher]
 	exec   *Executor
 
 	mu        sync.Mutex
@@ -183,8 +183,8 @@ func New(o Options) (*Pool, error) {
 		kernel: newKernel(o),
 		ctl:    newControl(o),
 		nodes:  newNodeSet(),
-		disp:   disp,
 	}
+	p.disp.Store(disp)
 	p.exec = newExecutor(p)
 	return p, nil
 }
@@ -207,7 +207,7 @@ func (p *Pool) SetStrategy(s Strategy) error {
 	if err != nil {
 		return err
 	}
-	p.disp = disp
+	p.disp.Store(disp)
 	return nil
 }
 
@@ -236,7 +236,15 @@ func (p *Pool) Start(ctx context.Context, nodes []NodeSpec, providers []Provider
 
 	// 首次同步节点；控制面刚起来时 /proxies 可能还没填充 provider 节点，重试几次
 	if err := p.syncNodes(ctx, 5); err != nil {
-		return fmt.Errorf("mihomo-pool: 内核已起但节点同步失败: %w", err)
+		// 回滚：停掉已启动的内核并复位 started，否则调用方重试 Start
+		// 会撞上 "Pool 已启动" 且内核残留占着端口。
+		sctx, cancel := context.WithTimeout(context.Background(), p.opts.StopTimeout)
+		_ = p.kernel.Stop(sctx)
+		cancel()
+		p.mu.Lock()
+		p.started = false
+		p.mu.Unlock()
+		return fmt.Errorf("mihomo-pool: 内核已起但节点同步失败（已回滚内核）: %w", err)
 	}
 	return nil
 }
@@ -317,7 +325,7 @@ func (p *Pool) Status(ctx context.Context) Status {
 	st := Status{
 		State:    ks.State,
 		PID:      ks.PID,
-		Strategy: p.disp.Strategy(),
+		Strategy: p.disp.Load().Strategy(),
 		Config:   ks.ConfigPath,
 		LastExit: ks.LastExit,
 		Restarts: ks.Restarts,

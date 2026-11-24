@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -200,6 +202,16 @@ func runStop(argv []string) int {
 	pid, perr := readPIDFile(*pidFile)
 	if perr != nil {
 		return fail("读 PID 文件失败: "+perr.Error(), nil)
+	}
+	// 校验 PID 确实是我们的托管进程：PID 会被系统回收重用，
+	// pid 文件过期后盲发 SIGTERM 可能误杀无关进程。
+	if runtime.GOOS == "linux" {
+		if cmdline, cerr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); cerr != nil ||
+			!strings.Contains(string(cmdline), "mihomo-pool") {
+			return fail(fmt.Sprintf("PID %d 对应的进程不是 mihomo-pool（可能已被回收）", pid), map[string]any{
+				"hint": "pid 文件已过期，托管进程可能已退出",
+			})
+		}
 	}
 	proc, perr := os.FindProcess(pid)
 	if perr != nil {
